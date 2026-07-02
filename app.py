@@ -18,7 +18,7 @@ from openpyxl.utils import get_column_letter
 
 
 APP_TITLE = "BIW DFMEA-DVP&R AI Assistant"
-TOOL_VERSION = "MVP-0.3"
+TOOL_VERSION = "MVP-0.4"
 PARTS_DIR = Path(__file__).parent / "examples" / "parts"
 DISCLAIMER = (
     "Draft engineering content for review only. All DFMEA, DVP&R, rating, "
@@ -39,6 +39,14 @@ GAP_WORKFLOW_NOTE = (
     "A validation gap remains open until the responsible engineer accepts the AI-recommended closure "
     "action and links supporting validation evidence."
 )
+METHODOLOGY_NOTE = (
+    "Structure follows the AIAG-VDA 7-step FMEA approach: planning, structure analysis, function "
+    "analysis (P-Diagram), failure analysis, risk analysis (S/O/D with AIAG-VDA Action Priority and "
+    "legacy RPN), optimization (recommended actions and revised ratings), and results documentation "
+    "(traceability, gap analysis, and export)."
+)
+SPECIAL_CHARACTERISTIC_VALUES = ["", "YC (Potential Critical)", "SC (Potential Significant)"]
+TEST_STAGE_VALUES = ["Virtual / CAE", "DV", "PV", "DV / PV"]
 FINAL_PITCH_POSITIONING = (
     "This is not a production DFMEA/DVP&R replacement. This is a working proof of concept. "
     "The goal is to test whether AI can help BIW engineers generate first-draft DFMEA content, "
@@ -102,6 +110,8 @@ DFMEA_COLUMNS = [
     "Risk Category",
     "Potential Failure Mode",
     "Potential Effect of Failure",
+    "End Effect (Vehicle Level)",
+    "Special Characteristic",
     "Potential Cause / Mechanism",
     "Initial Severity",
     "Initial Occurrence",
@@ -112,6 +122,7 @@ DFMEA_COLUMNS = [
     "Detection",
     "RPN",
     "Action Priority",
+    "AP (AIAG-VDA)",
     "Prevention Control",
     "Detection Control",
     "Recommended Action",
@@ -156,6 +167,8 @@ DVP_COLUMNS = [
     "Validation Level",
     "Test Objective",
     "Test Method / Procedure",
+    "Test Standard Reference",
+    "Test Stage",
     "Build Phase",
     "Sample Size",
     "Test Duration / Cycles",
@@ -295,6 +308,8 @@ LESSON_COLUMNS = [
     "Change Log",
 ]
 
+P_DIAGRAM_COLUMNS = ["Element", "Category", "Description"]
+
 ACTION_STATUS_VALUES = ["Open", "In Progress", "Complete", "Rejected", "Deferred"]
 VALIDATION_LEVEL_VALUES = ["CAE", "Coupon", "Component", "Subsystem", "Vehicle", "Subsystem / Vehicle"]
 BUILD_PHASE_VALUES = ["Concept", "Mule", "Alpha", "Beta", "Production Intent", "Launch"]
@@ -364,6 +379,7 @@ def init_state() -> None:
     st.session_state.setdefault("trace_df", empty_df(TRACE_COLUMNS))
     st.session_state.setdefault("gap_df", empty_df(GAP_COLUMNS))
     st.session_state.setdefault("lessons_df", empty_df(LESSON_COLUMNS))
+    st.session_state.setdefault("pdiag_df", empty_df(P_DIAGRAM_COLUMNS))
     st.session_state.setdefault("last_generated", False)
 
 
@@ -402,6 +418,67 @@ def action_priority(severity: int, occurrence: int, rpn_value: int) -> str:
     if rpn_value >= 80:
         return "Medium"
     return "Low"
+
+
+def aiag_vda_action_priority(severity: int, occurrence: int, detection: int) -> str:
+    """Condensed implementation of the AIAG-VDA 2019 Action Priority (AP) logic.
+
+    The official handbook uses a 1000-cell S/O/D lookup table. This function reproduces
+    the table's intent in banded form: AP is driven first by Severity, then Occurrence,
+    then Detection - it is NOT an RPN threshold. Production use must adopt the company's
+    approved AP table verbatim.
+    """
+    s, o, d = int(severity), int(occurrence), int(detection)
+    if s >= 9:
+        if o >= 4 or (o >= 2 and d >= 5):
+            return "H"
+        if o >= 2 or d >= 7:
+            return "M"
+        return "L"
+    if s >= 7:
+        if o >= 6 or (o >= 4 and d >= 5):
+            return "H"
+        if o >= 4 or (o >= 2 and d >= 5) or d >= 7:
+            return "M"
+        return "L"
+    if s >= 4:
+        if o >= 8 or (o >= 6 and d >= 7):
+            return "H"
+        if o >= 4 and d >= 5:
+            return "M"
+        return "L"
+    return "L"
+
+
+def special_characteristic(severity: int, occurrence: int) -> str:
+    """Flag potential special characteristics for engineering review.
+
+    Severity 9-10 -> potential critical characteristic (YC): safety or regulatory effect.
+    Severity 5-8 with elevated occurrence -> potential significant characteristic (SC).
+    Final designation always belongs to the responsible engineer and program SC process.
+    """
+    if severity >= 9:
+        return "YC (Potential Critical)"
+    if severity >= 5 and occurrence >= 4:
+        return "SC (Potential Significant)"
+    return ""
+
+
+def end_effect_for_category(category: str) -> str:
+    mapping = {
+        "Crash / Safety": "Degraded occupant protection or regulatory non-compliance at vehicle level",
+        "Durability": "Reduced vehicle service life; potential warranty repair and customer dissatisfaction",
+        "Joining / Durability": "Structural joint degradation over vehicle life; potential noise and warranty claim",
+        "Manufacturing Quality": "Inconsistent body structure quality reaching the customer; rework and cost impact",
+        "Corrosion": "Visible corrosion or perforation in the field; durability and perceived-quality impact",
+        "Dimensional": "Poor fit-and-finish, wind noise, or water leak perceived by the customer",
+        "Stamping / Formability": "Part quality escape or launch delay; potential durability margin reduction",
+        "NVH": "Buzz, squeak, rattle, or booming perceived by the customer during operation",
+        "Attachment / Durability": "Loss of component attachment function in service; noise and safety margin impact",
+        "Serviceability": "Extended repair time and cost of ownership impact for the customer",
+        "Assembly": "Assembly line disruption, rework, or quality escape to the customer",
+    }
+    return mapping.get(category, "Reduced vehicle-level performance, quality, or customer satisfaction")
 
 
 def residual_risk_level(rpn_value: int) -> str:
@@ -521,6 +598,9 @@ def dfmea_row(
     revised_rpn = rpn(revised_severity, revised_occurrence, revised_detection)
     reduction = round((initial_rpn - revised_rpn) / initial_rpn, 3) if initial_rpn else 0
     ap = action_priority(severity, occurrence, initial_rpn)
+    ap_vda = aiag_vda_action_priority(severity, occurrence, detection)
+    sc_flag = special_characteristic(severity, occurrence)
+    end_effect = end_effect_for_category(category)
     confidence = 0.7
     source_type = "Synthetic MVP Rule"
     reason = human_review_reason(severity, ap, confidence, source_type)
@@ -536,6 +616,8 @@ def dfmea_row(
         "Risk Category": category,
         "Potential Failure Mode": failure_mode,
         "Potential Effect of Failure": effect,
+        "End Effect (Vehicle Level)": end_effect,
+        "Special Characteristic": sc_flag,
         "Potential Cause / Mechanism": cause,
         "Initial Severity": severity,
         "Initial Occurrence": occurrence,
@@ -546,6 +628,7 @@ def dfmea_row(
         "Detection": detection,
         "RPN": initial_rpn,
         "Action Priority": ap,
+        "AP (AIAG-VDA)": ap_vda,
         "Prevention Control": prevention,
         "Detection Control": detection_control,
         "Recommended Action": action,
@@ -817,12 +900,87 @@ def generate_dfmea(inputs: dict[str, str]) -> pd.DataFrame:
     return finalize_dfmea(rows)
 
 
+def generate_p_diagram(inputs: dict[str, str]) -> pd.DataFrame:
+    """Generate a Parameter (P) Diagram supporting AIAG-VDA function analysis.
+
+    The P-Diagram documents the ideal function, input signal, control factors,
+    the five standard noise factor categories, and error states. It is the bridge
+    between function analysis and failure analysis in the 7-step approach.
+    """
+    ctx = make_context(inputs)
+    rows: list[tuple[str, str, str]] = []
+
+    rows.append(("Ideal Function", "Function", primary_function(inputs)))
+    rows.append(("Input Signal", "Function", inputs.get("load_cases") or "Structural loads transferred from interfacing body structure"))
+    rows.append(("Intended Output", "Function", "Loads transferred and geometry maintained per requirement over vehicle life"))
+
+    control_factors = [
+        f"Material selection: {inputs.get('material') or 'TBD'}",
+        f"Gauge / thickness: {inputs.get('thickness') or 'TBD'}",
+        f"Joining strategy: {inputs.get('joining_method') or 'TBD'}",
+        f"Manufacturing process: {inputs.get('manufacturing_process') or 'TBD'}",
+        "Section geometry, bead strategy, and local reinforcement",
+        "Datum and locating strategy (GD&T)",
+    ]
+    for factor in control_factors:
+        rows.append(("Control Factor", "Design Parameter", factor))
+
+    rows.append(("Noise: Piece-to-Piece Variation", "Noise Factor", "Stamping thickness/springback variation, weld nugget variation, adhesive bead variation, fixture variation"))
+    rows.append(("Noise: Changes Over Time", "Noise Factor", "Fatigue damage accumulation, corrosion progression, adhesive aging, joint relaxation"))
+    rows.append(("Noise: Customer Usage", "Noise Factor", "Severe road inputs, overload events, towing/payload extremes, high-mileage duty cycles"))
+    rows.append(("Noise: External Environment", "Noise Factor", inputs.get("environmental_exposure") or "Temperature cycling, humidity, road salt, stone impingement"))
+    rows.append(("Noise: System Interaction", "Noise Factor", inputs.get("interfaces") or "Load and tolerance interaction with mating body structure"))
+
+    error_states = ["Dimensional variation beyond tolerance during body build"]
+    if ctx.has_any(["fatigue", "durability", "torsional"]):
+        error_states.append("Fatigue crack initiation at stress concentration")
+    if ctx.has_any(["weld", "spot weld"]):
+        error_states.append("Weld joint fatigue or nugget nonconformance")
+    if ctx.has_any(["adhesive", "bond"]):
+        error_states.append("Adhesive bond degradation or disbond")
+    if ctx.has_any(["corrosion", "underbody", "salt", "flange"]):
+        error_states.append("Corrosion initiation at flange or closed section")
+    if ctx.has_any(["crash", "impact", "load path", "load-path"]):
+        error_states.append("Unstable crash load-path deformation")
+    if ctx.has_any(["nvh", "stiffness", "rattle", "buzz"]):
+        error_states.append("NVH degradation from insufficient local stiffness")
+    if ctx.has_any(["bracket", "mount", "fastener", "bolt"]):
+        error_states.append("Attachment pull-out or loosening under load")
+    for state in error_states:
+        rows.append(("Error State", "Failure Mode Link", state))
+
+    rows.append(("Methodology", "Reference", METHODOLOGY_NOTE))
+    return pd.DataFrame(rows, columns=P_DIAGRAM_COLUMNS)
+
+
+def fmea_header_dataframe(inputs: dict[str, str]) -> pd.DataFrame:
+    """AIAG-VDA planning & preparation: FMEA header / identification block."""
+    component = inputs.get("component_name") or "BIW Component"
+    fmea_id = "DFMEA-BIW-" + "".join(word[0] for word in component.split()[:4]).upper() + "-001"
+    rows = [
+        ("FMEA ID", fmea_id),
+        ("Subject", component),
+        ("Vehicle Area / System", inputs.get("vehicle_area", "")),
+        ("Program Phase", inputs.get("program_phase") or "TBD"),
+        ("Design Responsibility", inputs.get("engineer_name") or "TBD"),
+        ("Core Team", "BIW design, CAE, validation, manufacturing, quality, materials (to be confirmed)"),
+        ("FMEA Start Date", date.today().isoformat()),
+        ("FMEA Revision Date", date.today().isoformat()),
+        ("Revision", TOOL_VERSION + " draft"),
+        ("Methodology", METHODOLOGY_NOTE),
+        ("Confidentiality", "Synthetic prototype data - no confidential program content"),
+    ]
+    return pd.DataFrame(rows, columns=["Field", "Value"])
+
+
 def validation_profile(test: str, validation_type: str) -> dict[str, str]:
     text = f"{test} {validation_type}".lower()
     if "crash" in text:
         return {
             "Validation Level": "Subsystem / Vehicle",
             "Test Method / Procedure": "Crash CAE correlation and physical crash validation procedure",
+            "Test Standard Reference": "FMVSS / internal crash procedure CR-BIW-001 (synthetic ref)",
+            "Test Stage": "DV",
             "Build Phase": "Alpha",
             "Sample Size": "1 CAE model + 1 vehicle or subsystem build",
             "Test Duration / Cycles": "One crash event with pre and post-test teardown",
@@ -832,6 +990,8 @@ def validation_profile(test: str, validation_type: str) -> dict[str, str]:
         return {
             "Validation Level": "Component",
             "Test Method / Procedure": "CAE durability review plus physical durability schedule",
+            "Test Standard Reference": "TS-DUR-BIW-014 durability schedule (synthetic ref)",
+            "Test Stage": "DV",
             "Build Phase": "Beta",
             "Sample Size": "3 components minimum",
             "Test Duration / Cycles": "Program durability target cycles",
@@ -841,6 +1001,8 @@ def validation_profile(test: str, validation_type: str) -> dict[str, str]:
         return {
             "Validation Level": "Coupon",
             "Test Method / Procedure": "Weld destruct, peel, nugget, and teardown inspection",
+            "Test Standard Reference": "WS-JOIN-003 weld quality standard (synthetic ref)",
+            "Test Stage": "DV / PV",
             "Build Phase": "Alpha",
             "Sample Size": "10 weld coupons or representative body joints",
             "Test Duration / Cycles": "Per weld validation plan",
@@ -850,6 +1012,8 @@ def validation_profile(test: str, validation_type: str) -> dict[str, str]:
         return {
             "Validation Level": "Component",
             "Test Method / Procedure": "Corrosion cycle test and coating section review",
+            "Test Standard Reference": "TS-COR-021 cyclic corrosion procedure (synthetic ref)",
+            "Test Stage": "DV / PV",
             "Build Phase": "Beta",
             "Sample Size": "3 components minimum",
             "Test Duration / Cycles": "Program corrosion cycle target",
@@ -859,6 +1023,8 @@ def validation_profile(test: str, validation_type: str) -> dict[str, str]:
         return {
             "Validation Level": "Subsystem",
             "Test Method / Procedure": "Body build dimensional measurement study",
+            "Test Standard Reference": "DIM-BUILD-007 body dimensional procedure (synthetic ref)",
+            "Test Stage": "PV",
             "Build Phase": "Alpha",
             "Sample Size": "10 builds or measurement events",
             "Test Duration / Cycles": "Build event duration",
@@ -868,6 +1034,8 @@ def validation_profile(test: str, validation_type: str) -> dict[str, str]:
         return {
             "Validation Level": "Component",
             "Test Method / Procedure": "Forming simulation and tryout thickness inspection",
+            "Test Standard Reference": "FORM-TRY-002 tryout inspection procedure (synthetic ref)",
+            "Test Stage": "Virtual / CAE",
             "Build Phase": "Concept",
             "Sample Size": "3 tryout parts minimum",
             "Test Duration / Cycles": "Die tryout event",
@@ -877,6 +1045,8 @@ def validation_profile(test: str, validation_type: str) -> dict[str, str]:
         return {
             "Validation Level": "Subsystem",
             "Test Method / Procedure": "Modal analysis and local stiffness test",
+            "Test Standard Reference": "NVH-MOD-005 modal test procedure (synthetic ref)",
+            "Test Stage": "DV",
             "Build Phase": "Beta",
             "Sample Size": "1 body structure or subsystem",
             "Test Duration / Cycles": "Modal sweep and stiffness measurement",
@@ -885,6 +1055,8 @@ def validation_profile(test: str, validation_type: str) -> dict[str, str]:
     return {
         "Validation Level": "Component",
         "Test Method / Procedure": "Engineering validation procedure to be defined",
+        "Test Standard Reference": "TBD - assign approved internal test standard",
+        "Test Stage": "DV",
         "Build Phase": "Alpha",
         "Sample Size": "TBD",
         "Test Duration / Cycles": "TBD",
@@ -920,6 +1092,8 @@ def dvp_row(
         "Validation Level": profile["Validation Level"],
         "Test Objective": objective,
         "Test Method / Procedure": profile["Test Method / Procedure"],
+        "Test Standard Reference": profile["Test Standard Reference"],
+        "Test Stage": profile["Test Stage"],
         "Build Phase": profile["Build Phase"],
         "Sample Size": profile["Sample Size"],
         "Test Duration / Cycles": profile["Test Duration / Cycles"],
@@ -1565,6 +1739,7 @@ def generate_all() -> None:
     trace_df = generate_traceability(dfmea_df, dvp_df)
     gap_df = generate_gap_analysis(trace_df)
     lessons_df = generate_lessons(dfmea_df)
+    st.session_state.pdiag_df = generate_p_diagram(inputs)
     st.session_state.dfmea_df = dfmea_df
     st.session_state.dvp_df = dvp_df
     st.session_state.trace_df = trace_df
@@ -1799,6 +1974,11 @@ def settings_dataframe() -> pd.DataFrame:
         ),
         ("Action Priority Logic", "Medium", "RPN >= 80 and not High"),
         ("Action Priority Logic", "Low", "All remaining rows"),
+        ("AP (AIAG-VDA) Logic", "H / M / L", "Banded implementation of the AIAG-VDA 2019 Action Priority table driven by Severity, then Occurrence, then Detection - not an RPN threshold. Production must adopt the approved company AP table."),
+        ("Special Characteristic Logic", "YC (Potential Critical)", "Severity 9-10: potential safety or regulatory effect - candidate critical characteristic"),
+        ("Special Characteristic Logic", "SC (Potential Significant)", "Severity 5-8 with Occurrence >= 4 - candidate significant characteristic"),
+        ("Special Characteristic Logic", "Note", "Final YC/CC/SC designation belongs to the responsible engineer and the program special characteristics process."),
+        ("Test Stage Values", "Values", ", ".join(v for v in TEST_STAGE_VALUES if v)),
         ("Coverage Score Logic", "100", "Covered with CAE and physical validation"),
         ("Coverage Score Logic", "70", "Covered with one strong validation method"),
         ("Coverage Score Logic", "50", "Partial coverage"),
@@ -1886,7 +2066,9 @@ def workbook_tables(
     return {
         "Management Summary": management_summary_dataframe(inputs, dfmea_df, dvp_df, trace_df, gap_df, lessons_df),
         "Dashboard": dashboard_dataframe(dfmea_df, sorted_dvp_df, trace_df, gap_df, lessons_df),
+        "FMEA Header": fmea_header_dataframe(inputs),
         "Component Input": component_input_dataframe(inputs),
+        "P-Diagram": generate_p_diagram(inputs),
         "DFMEA": dfmea_df,
         "DVP&R": sorted_dvp_df,
         "Traceability": trace_df,
@@ -2164,6 +2346,12 @@ def format_excel_workbook(writer: pd.ExcelWriter, tables: dict[str, pd.DataFrame
                 cell.alignment = Alignment(vertical="top", wrap_text=True)
 
         apply_status_fills(ws, "Action Priority", {"High": high_fill, "Medium": medium_fill, "Low": low_fill})
+        apply_status_fills(ws, "AP (AIAG-VDA)", {"H": high_fill, "M": medium_fill, "L": low_fill})
+        apply_status_fills(
+            ws,
+            "Special Characteristic",
+            {"YC (Potential Critical)": high_fill, "SC (Potential Significant)": medium_fill},
+        )
         apply_status_fills(ws, "Residual Risk Level", {"High": high_fill, "Medium": medium_fill, "Low": low_fill})
         apply_status_fills(
             ws,
@@ -2225,6 +2413,8 @@ def format_excel_workbook(writer: pd.ExcelWriter, tables: dict[str, pd.DataFrame
         add_dropdown(ws, "Action Status", ACTION_STATUS_VALUES)
         add_dropdown(ws, "Validation Level", VALIDATION_LEVEL_VALUES)
         add_dropdown(ws, "Build Phase", BUILD_PHASE_VALUES)
+        add_dropdown(ws, "Test Stage", TEST_STAGE_VALUES)
+        add_dropdown(ws, "Special Characteristic", [v for v in SPECIAL_CHARACTERISTIC_VALUES if v])
         add_dropdown(ws, "Pass / Fail", PASS_FAIL_VALUES)
         add_dropdown(ws, "Validation Status", VALIDATION_STATUS_VALUES)
         add_dropdown(ws, "Gap Status", GAP_STATUS_VALUES)
@@ -2338,9 +2528,95 @@ def selected_part_label() -> str:
     return DEFAULT_PART_LABEL
 
 
+APP_CSS = """
+<style>
+/* ---- global typography and spacing ---- */
+.block-container { padding-top: 1.2rem; }
+
+/* ---- hero banner ---- */
+.biw-hero {
+    background: linear-gradient(135deg, #10312B 0%, #1A4A40 70%, #17423A 100%);
+    border-radius: 14px;
+    padding: 1.5rem 1.8rem 1.35rem 1.8rem;
+    margin-bottom: 1.0rem;
+}
+.biw-hero h1 {
+    color: #FFFFFF;
+    font-size: 1.65rem;
+    font-weight: 700;
+    margin: 0 0 0.25rem 0;
+    padding: 0;
+}
+.biw-hero p {
+    color: #C9DAD4;
+    font-size: 0.92rem;
+    margin: 0;
+}
+.biw-badge {
+    display: inline-block;
+    background: #E8A33D;
+    color: #10312B;
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    border-radius: 999px;
+    padding: 0.15rem 0.7rem;
+    margin-bottom: 0.55rem;
+    text-transform: uppercase;
+}
+.biw-disclaimer {
+    background: rgba(232, 163, 61, 0.14);
+    border-radius: 8px;
+    color: #F4D9A8;
+    font-size: 0.8rem;
+    padding: 0.45rem 0.75rem;
+    margin-top: 0.75rem;
+}
+
+/* ---- tabs ---- */
+.stTabs [data-baseweb="tab-list"] { gap: 0.35rem; }
+.stTabs [data-baseweb="tab"] {
+    background: #EEF4F1;
+    border-radius: 8px 8px 0 0;
+    padding: 0.5rem 1.0rem;
+    font-weight: 600;
+}
+.stTabs [aria-selected="true"] {
+    background: #10312B !important;
+    color: #FFFFFF !important;
+}
+
+/* ---- metric cards ---- */
+div[data-testid="stMetric"] {
+    background: #EEF4F1;
+    border-radius: 10px;
+    padding: 0.7rem 0.9rem;
+    box-shadow: 0 1px 4px rgba(16, 49, 43, 0.10);
+}
+div[data-testid="stMetric"] label { color: #5C6B66; }
+
+/* ---- buttons ---- */
+.stButton > button[kind="primary"], .stDownloadButton > button {
+    border-radius: 8px;
+    font-weight: 600;
+}
+</style>
+"""
+
+
 def render_header() -> None:
-    st.title(APP_TITLE)
-    st.warning(DISCLAIMER, icon=":material/warning:")
+    st.markdown(APP_CSS, unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div class="biw-hero">
+            <span class="biw-badge">Prototype {TOOL_VERSION} · AIAG-VDA aligned · Engineer approved</span>
+            <h1>{APP_TITLE}</h1>
+            <p>Component inputs &rarr; P-Diagram &rarr; draft DFMEA &rarr; recommended DVP&amp;R &rarr; traceability &amp; gap detection &rarr; management-ready export.</p>
+            <div class="biw-disclaimer">&#9888;&#65039; {DISCLAIMER}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     with st.sidebar:
         st.subheader("Prototype Mode")
@@ -2422,14 +2698,48 @@ def render_input() -> None:
 
     st.text_area("Applicable assumptions", key="assumptions", height=70)
 
+    with st.expander("FMEA header (AIAG-VDA planning & preparation)", expanded=False):
+        st.caption("Auto-derived identification block. A production version would pull this from the program FMEA register.")
+        st.dataframe(fmea_header_dataframe(component_inputs()), width="stretch", hide_index=True)
+
     if st.button("Generate Drafts", type="primary"):
         generate_all()
-        st.success("Draft DFMEA, DVP&R, traceability, gaps, dashboard, and lessons generated.")
+        st.success("P-Diagram, draft DFMEA, DVP&R, traceability, gaps, dashboard, and lessons generated.")
+
+
+def render_pdiagram() -> None:
+    st.subheader("P-Diagram (Function Analysis)")
+    st.caption(
+        "Parameter diagram supporting AIAG-VDA Step 3: ideal function, input signal, control factors, "
+        "the five noise factor categories, and error states that feed the failure analysis."
+    )
+    if st.button("Generate P-Diagram"):
+        st.session_state.pdiag_df = generate_p_diagram(component_inputs())
+        st.success("P-Diagram generated from component inputs.")
+    if st.session_state.pdiag_df.empty:
+        st.info("Load a part and click Generate Drafts (or Generate P-Diagram) to build the function analysis.")
+        return
+    pdiag = st.session_state.pdiag_df
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Control Factors", int((pdiag["Element"] == "Control Factor").sum()))
+    c2.metric("Noise Factor Categories", int(pdiag["Element"].str.startswith("Noise:").sum()))
+    c3.metric("Error States", int((pdiag["Element"] == "Error State").sum()))
+    st.session_state.pdiag_df = st.data_editor(
+        pdiag,
+        num_rows="dynamic",
+        width="stretch",
+        hide_index=True,
+    )
+    st.caption("Error states listed here should each map to a failure mode in the DFMEA tab.")
+    st.download_button("Download P-Diagram CSV", dataframe_to_csv(st.session_state.pdiag_df), "p_diagram.csv", "text/csv")
 
 
 def render_dfmea() -> None:
     st.subheader("DFMEA")
-    st.caption("Includes stable IDs, S/O/D, RPN, Action Priority, residual risk, action tracking, and engineer review fields.")
+    st.caption(
+        "Includes stable IDs, vehicle-level end effects, special characteristic candidates (YC/SC), S/O/D, "
+        "RPN, AIAG-VDA Action Priority, residual risk, action tracking, and engineer review fields."
+    )
     if st.button("Generate DFMEA"):
         st.session_state.dfmea_df = generate_dfmea(component_inputs())
         st.session_state.dvp_df = empty_df(DVP_COLUMNS)
@@ -2450,6 +2760,8 @@ def render_dfmea() -> None:
             "Occurrence": st.column_config.NumberColumn(min_value=1, max_value=10, step=1),
             "Detection": st.column_config.NumberColumn(min_value=1, max_value=10, step=1),
             "RPN Reduction %": st.column_config.NumberColumn(format="percent"),
+            "Special Characteristic": st.column_config.SelectboxColumn(options=SPECIAL_CHARACTERISTIC_VALUES),
+            "AP (AIAG-VDA)": st.column_config.SelectboxColumn(options=["H", "M", "L"]),
         },
     )
     refresh_downstream_from_edits()
@@ -2575,24 +2887,26 @@ def render_export() -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title=APP_TITLE, layout="wide")
+    st.set_page_config(page_title=APP_TITLE, page_icon="🚙", layout="wide")
     init_state()
     render_header()
 
-    tabs = st.tabs(["Input", "DFMEA", "DVP&R", "Traceability", "Gaps", "Dashboard", "Export"])
+    tabs = st.tabs(["Input", "P-Diagram", "DFMEA", "DVP&R", "Traceability", "Gaps", "Dashboard", "Export"])
     with tabs[0]:
         render_input()
     with tabs[1]:
-        render_dfmea()
+        render_pdiagram()
     with tabs[2]:
-        render_dvp()
+        render_dfmea()
     with tabs[3]:
-        render_traceability()
+        render_dvp()
     with tabs[4]:
-        render_gaps()
+        render_traceability()
     with tabs[5]:
-        render_dashboard()
+        render_gaps()
     with tabs[6]:
+        render_dashboard()
+    with tabs[7]:
         render_export()
 
 

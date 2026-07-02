@@ -24,6 +24,16 @@ This is a Streamlit MVP for creating first-pass BIW sheet metal DFMEA and DVP&R 
 - Includes source, RAG citation, reviewer, decision, and notes columns so later OpenAI and RAG suggestions can be tracked.
 - Loads example part definitions from separate JSON files under `examples/parts`.
 
+## What's New in MVP-0.4 (AIAG-VDA alignment + modern UI)
+
+- **P-Diagram tab** — generated parameter diagram (ideal function, input signal, control factors, the five standard noise factor categories, and error states) supporting AIAG-VDA Step 3 function analysis. Error states map to DFMEA failure modes.
+- **FMEA header block** — AIAG-VDA planning & preparation identification block (FMEA ID, subject, design responsibility, core team, key dates, revision) shown on the Input tab and exported as its own workbook sheet.
+- **Special Characteristic candidates** — YC (potential critical, S 9–10) and SC (potential significant, S 5–8 with elevated occurrence) flags per DFMEA row, with color coding and dropdowns in the Excel export. Final designation stays with the engineer.
+- **AP (AIAG-VDA)** — banded implementation of the AIAG-VDA 2019 Action Priority logic (Severity → Occurrence → Detection, not an RPN threshold) alongside the legacy RPN-based priority for comparison.
+- **Vehicle-level end effects** — every failure mode now carries an end effect at customer/vehicle level in addition to the local effect.
+- **DVP&R test stages and standards** — DV / PV / Virtual-CAE stage classification and synthetic test standard references (e.g., TS-DUR-BIW-014) per validation row.
+- **Modern UI** — themed hero header, forest-green/amber design language, styled tabs and metric cards, custom Streamlit theme.
+
 ## Run Locally
 
 ```bash
