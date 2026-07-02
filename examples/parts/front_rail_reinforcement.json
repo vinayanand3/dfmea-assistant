@@ -1,0 +1,15 @@
+{
+  "component_name": "Front Rail Reinforcement",
+  "vehicle_area": "Front Underbody / Crash Structure",
+  "component_category": "Load-path reinforcement",
+  "material": "Ultra-high-strength steel",
+  "thickness": "1.6 mm",
+  "joining_method": "Spot welds + laser welds",
+  "manufacturing_process": "Stamped rail reinforcement welded into front rail assembly",
+  "primary_function": "Support front crash load path and front structure durability",
+  "interfaces": "Front rail, shotgun, bumper beam bracket, dash crossmember, underbody node",
+  "load_cases": "Frontal impact, offset impact, towing load, road durability, body torsion",
+  "environmental_exposure": "Front underbody corrosion exposure and stone impact",
+  "known_design_concerns": "Crash load path, fatigue, spot weld quality, dimensional variation, corrosion, forming split",
+  "assumptions": "Synthetic demo data only. Final values require engineering review."
+}

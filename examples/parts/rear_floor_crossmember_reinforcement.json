@@ -1,0 +1,15 @@
+{
+  "component_name": "Rear Floor Crossmember Reinforcement",
+  "vehicle_area": "Underbody / Rear Structure",
+  "component_category": "Reinforcement",
+  "material": "High-strength steel",
+  "thickness": "1.8 mm",
+  "joining_method": "Spot welds + structural adhesive",
+  "manufacturing_process": "Stamped and welded assembly",
+  "primary_function": "Transfer rear crash and durability loads",
+  "interfaces": "Rear rail, floor panel, suspension bracket",
+  "load_cases": "Rear impact, road durability, torsional body loads",
+  "environmental_exposure": "Underbody corrosion exposure",
+  "known_design_concerns": "Fatigue, corrosion, dimensional variation, crash load path",
+  "assumptions": "Synthetic demo data only. Final values require engineering review."
+}

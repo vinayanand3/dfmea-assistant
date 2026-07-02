@@ -1,0 +1,15 @@
+{
+  "component_name": "Roof Rail Reinforcement",
+  "vehicle_area": "Upper Body / Side Structure",
+  "component_category": "Roof and side aperture reinforcement",
+  "material": "High-strength steel",
+  "thickness": "1.2 mm",
+  "joining_method": "Spot welds + hem flange adhesive",
+  "manufacturing_process": "Stamped rail reinforcement joined to side aperture and roof structure",
+  "primary_function": "Maintain roof rail stiffness, side aperture dimensional stability, and roof load support",
+  "interfaces": "A-pillar upper, B-pillar upper, roof bow, side outer, curtain airbag bracket",
+  "load_cases": "Roof crush, door slam, body torsion, curtain airbag deployment, road durability",
+  "environmental_exposure": "Moisture exposure near roof ditch, hem flange, and upper aperture interfaces",
+  "known_design_concerns": "Dimensional variation, adhesive bond, corrosion at hem flange, NVH buzz squeak rattle, roof crush load path",
+  "assumptions": "Synthetic demo data only. Final values require engineering review."
+}

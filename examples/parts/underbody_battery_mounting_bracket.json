@@ -1,0 +1,15 @@
+{
+  "component_name": "Underbody Battery Mounting Bracket",
+  "vehicle_area": "Underbody / Battery Interface",
+  "component_category": "Mounting bracket",
+  "material": "High-strength low-alloy steel",
+  "thickness": "2.5 mm",
+  "joining_method": "Spot welds + mechanical fasteners",
+  "manufacturing_process": "Stamped bracket welded to underbody reinforcement",
+  "primary_function": "Transfer battery pack mounting loads into the underbody structure",
+  "interfaces": "Battery pack mount, underbody rail, floor reinforcement, fastener stack",
+  "load_cases": "Battery mass load, road durability, curb strike, service load, body torsion",
+  "environmental_exposure": "Severe underbody corrosion, road splash, stone impact, salt exposure",
+  "known_design_concerns": "Bracket fatigue, fastener pull-out, corrosion, spot weld fatigue, dimensional mismatch, serviceability",
+  "assumptions": "Synthetic demo data only. Final values require engineering review."
+}

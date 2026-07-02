@@ -1,0 +1,15 @@
+{
+  "component_name": "Shock Tower Reinforcement",
+  "vehicle_area": "Front Body / Suspension Structure",
+  "component_category": "Reinforcement",
+  "material": "Advanced high-strength steel",
+  "thickness": "2.0 mm",
+  "joining_method": "Spot welds + structural adhesive",
+  "manufacturing_process": "Stamped reinforcement welded into front body assembly",
+  "primary_function": "Distribute suspension loads into the upper body structure",
+  "interfaces": "Shock tower, apron panel, upper rail, cowl side reinforcement",
+  "load_cases": "Road durability, pothole impact, cornering loads, body torsion",
+  "environmental_exposure": "Wheelhouse splash, stone impact, corrosion exposure",
+  "known_design_concerns": "Fatigue, spot weld fatigue, corrosion, dimensional variation, stiffness, forming thinning",
+  "assumptions": "Synthetic demo data only. Final values require engineering review."
+}
