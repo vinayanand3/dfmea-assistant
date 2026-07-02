@@ -1,3 +1,13 @@
+---
+title: Dfmea Assistant
+emoji: 🚀
+colorFrom: blue
+colorTo: red
+sdk: streamlit
+app_file: app.py
+pinned: false
+---
+
 # BIW DFMEA-DVP&R AI Assistant
 
 This is a Streamlit MVP for creating first-pass BIW sheet metal DFMEA and DVP&R content from component inputs. The current version uses deterministic rules and synthetic engineering logic only. It is intentionally structured so an OpenAI or RAG-backed generation layer can be added later.
