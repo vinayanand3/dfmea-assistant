@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 from openpyxl.chart import BarChart, PieChart, Reference
+from openpyxl.chart.series import SeriesLabel
 from openpyxl.formatting.rule import ColorScaleRule
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -23,6 +24,53 @@ DISCLAIMER = (
     "Draft engineering content for review only. All DFMEA, DVP&R, rating, "
     "validation, and release decisions require responsible engineering approval."
 )
+PROTOTYPE_BOUNDARY_STATEMENT = (
+    "This prototype uses synthetic BIW example data and rule-based AI logic for demonstration. "
+    "It does not use confidential program data. A production version would need to run in a secure "
+    "internal environment connected to approved DFMEA, DVP&R, CAE, validation, lessons learned, "
+    "and engineering standards documents."
+)
+ACTION_PRIORITY_DISCLAIMER = (
+    "Prototype Action Priority logic is used for demonstration. Production deployment should align "
+    "Action Priority calculation with the company's approved FMEA rating method, internal quality "
+    "standards, and customer-specific requirements."
+)
+GAP_WORKFLOW_NOTE = (
+    "A validation gap remains open until the responsible engineer accepts the AI-recommended closure "
+    "action and links supporting validation evidence."
+)
+FINAL_PITCH_POSITIONING = (
+    "This is not a production DFMEA/DVP&R replacement. This is a working proof of concept. "
+    "The goal is to test whether AI can help BIW engineers generate first-draft DFMEA content, "
+    "recommend DVP&R validation items, calculate risk priority, link risks to validation coverage, "
+    "and flag gaps for engineer review. The engineer remains the final decision-maker."
+)
+DEMO_STORY = (
+    "For the front rail reinforcement example, the tool generated 9 DFMEA failure modes, identified "
+    "4 high-severity risks, recommended or proposed 14 DVP&R validation items, calculated initial "
+    "and revised RPN, estimated 43% residual risk reduction, reused 8 lessons learned, and identified "
+    "1 high-priority validation gap with a proposed closure test."
+)
+DASHBOARD_FOOTNOTES = [
+    "RPN = Severity x Occurrence x Detection.",
+    "Revised RPN estimates residual risk after proposed mitigation.",
+    "Coverage Score reflects linked validation maturity.",
+    "AI recommendations require engineer review before release.",
+    "Synthetic demo data used for prototype only.",
+]
+PITCH_READINESS_ITEMS = [
+    "Dashboard KPI labels are clear",
+    "Percentages are formatted correctly",
+    "Chart legends are renamed",
+    "DVP&R test IDs are sorted",
+    "Open gaps are clearly marked",
+    "AI-proposed closure tests are visible",
+    "Prototype disclaimer is visible",
+    "Engineer approval boundary is visible",
+    "Action Priority disclaimer is included",
+    "Management demo story is included",
+    "File does not contain confidential company data",
+]
 
 COMPONENT_FIELDS = [
     "component_name",
@@ -199,12 +247,16 @@ GAP_COLUMNS = [
     "Responsible Team",
     "Priority",
     "Status",
+    "Gap Status",
     "AI Recommended Test ID",
     "AI Recommended Test Name",
+    "AI Recommended Closure Test",
     "Expected Coverage Improvement",
     "After Engineer Approval Coverage Status",
     "Engineer Decision",
     "Gap Closure Status",
+    "Evidence Link",
+    "Final Gap Closure Status",
     "Rejection Reason",
     "Final Approved Text",
     "Reviewed By",
@@ -248,6 +300,7 @@ VALIDATION_LEVEL_VALUES = ["CAE", "Coupon", "Component", "Subsystem", "Vehicle",
 BUILD_PHASE_VALUES = ["Concept", "Mule", "Alpha", "Beta", "Production Intent", "Launch"]
 PASS_FAIL_VALUES = ["TBD", "Not Run", "Pass", "Fail", "Waived"]
 VALIDATION_STATUS_VALUES = ["Planned", "Proposed", "In Progress", "Passed", "Failed", "Waived", "Blocked"]
+GAP_STATUS_VALUES = ["Open", "Proposed", "Accepted", "In Progress", "Closed", "Waived"]
 ENGINEER_DECISION_VALUES = ["Accept", "Modify", "Reject", "Pending", "Needs More Data"]
 APPROVAL_STATUS_VALUES = ["Draft", "Under Review", "Approved", "Rejected", "Deferred"]
 REJECTION_REASON_VALUES = ["Not applicable", "Duplicate", "Wrong risk", "Needs more data", "Other"]
@@ -1147,7 +1200,23 @@ def generate_dvp(dfmea_df: pd.DataFrame, settings: dict[str, Any] | None = None)
             next_id += 1
         row["AI Suggestion ID"] = f"AI-DVPR-{index:03d}"
 
-    return pd.DataFrame(rows, columns=DVP_COLUMNS)
+    return sort_dvp_by_test_id(pd.DataFrame(rows, columns=DVP_COLUMNS))
+
+
+def test_id_sort_value(test_id: Any) -> int:
+    value = str(test_id or "").strip().upper()
+    if value.startswith("TEST-"):
+        value = value.replace("TEST-", "", 1)
+    return int(value) if value.isdigit() else 999999
+
+
+def sort_dvp_by_test_id(dvp_df: pd.DataFrame) -> pd.DataFrame:
+    if dvp_df.empty or "Test ID" not in dvp_df:
+        return dvp_df
+    sorted_df = dvp_df.copy()
+    sorted_df["_test_sort"] = sorted_df["Test ID"].map(test_id_sort_value)
+    sorted_df = sorted_df.sort_values(["_test_sort", "Test ID"], kind="stable").drop(columns=["_test_sort"])
+    return sorted_df.reset_index(drop=True)
 
 
 def coverage_assessment(dfmea_row_data: pd.Series, matches: pd.DataFrame) -> dict[str, Any]:
@@ -1336,6 +1405,8 @@ def generate_gap_analysis(trace_df: pd.DataFrame) -> pd.DataFrame:
             gap_type = "Partial Validation Coverage"
         closure_status = "Proposed" if status == "Proposed Coverage" else "Open"
         final_text = row.get("AI Recommended Test Name", "") or row.get("Recommended Additional Test", "")
+        evidence_link = ""
+        final_gap_status = closure_status
         rows.append(
             {
                 "Gap ID": f"GAP-{len(rows) + 1:03d}",
@@ -1351,12 +1422,16 @@ def generate_gap_analysis(trace_df: pd.DataFrame) -> pd.DataFrame:
                 "Responsible Team": row.get("Owner", "BIW / Validation"),
                 "Priority": row.get("Priority", "Medium"),
                 "Status": closure_status,
+                "Gap Status": closure_status,
                 "AI Recommended Test ID": row.get("AI Recommended Test ID", ""),
                 "AI Recommended Test Name": row.get("AI Recommended Test Name", ""),
+                "AI Recommended Closure Test": final_text,
                 "Expected Coverage Improvement": row.get("Expected Coverage Improvement", ""),
                 "After Engineer Approval Coverage Status": "Covered if accepted and evidence is attached",
                 "Engineer Decision": "Pending",
                 "Gap Closure Status": closure_status,
+                "Evidence Link": evidence_link,
+                "Final Gap Closure Status": final_gap_status,
                 "Rejection Reason": "Not applicable",
                 "Final Approved Text": final_text,
                 "Reviewed By": "TBD",
@@ -1542,6 +1617,8 @@ def dashboard_dataframe(
         ("Prototype Boundary", "Production Intent", "Secure Internal RAG", ""),
         ("Prototype Boundary", "Engineer Approval Required", "Yes", ""),
         ("Prototype Boundary", "AI Role", "Draft / Recommend / Check Gaps / Summarize", ""),
+        ("Prototype Boundary", "Prototype Boundary Statement", PROTOTYPE_BOUNDARY_STATEMENT, ""),
+        ("Prototype Boundary", "Gap Closure Rule", GAP_WORKFLOW_NOTE, ""),
     ]
 
     kpis = [
@@ -1553,8 +1630,8 @@ def dashboard_dataframe(
         ("KPI", "Estimated RPN Reduction %", reduction, ""),
         ("KPI", "High Action Priority Items", safe_count(dfmea_df, "Action Priority", "High"), ""),
         ("KPI", "Total DVP&R Tests", len(dvp_df), ""),
-        ("KPI", "Overall Validation Coverage %", round(coverage / 100, 3), ""),
-        ("KPI", "High-Severity Validation Coverage %", round(high_coverage / 100, 3), ""),
+        ("KPI", "Overall Validation Coverage Score", round(coverage / 100, 3), ""),
+        ("KPI", "High-Severity Validation Coverage Score", round(high_coverage / 100, 3), ""),
         ("KPI", "Open High-Priority Gaps", len(gap_df[gap_df["Priority"].eq("High")]) if not gap_df.empty else 0, ""),
         ("KPI", "Open Validation Gaps", len(gap_df), ""),
         ("KPI", "Partial Coverage Items", safe_count(trace_df, "Coverage Status", "Partial"), ""),
@@ -1562,6 +1639,17 @@ def dashboard_dataframe(
         ("KPI", "Lessons Reused", len(lessons_df), ""),
         ("KPI", "AI Suggestions Accepted", accepted, ""),
         ("KPI", "AI Suggestions Rejected", rejected, ""),
+    ]
+
+    footnote_rows = [
+        ("Dashboard Footnote", f"Footnote {idx}", note, "")
+        for idx, note in enumerate(DASHBOARD_FOOTNOTES, start=1)
+    ]
+
+    coverage_score_rows = [
+        ("Coverage Score Header", "Coverage Measure", "Validation Coverage Score", ""),
+        ("Coverage Score", "Overall Validation Coverage Score", round(coverage / 100, 3), ""),
+        ("Coverage Score", "High-Severity Coverage Score", round(high_coverage / 100, 3), ""),
     ]
 
     rpn_rows = [("RPN Chart Header", "Failure Mode", "Initial RPN", "Revised RPN")]
@@ -1595,7 +1683,7 @@ def dashboard_dataframe(
         owner_rows.insert(0, ("Open Actions Header", "Action Owner", "Open Action Count", ""))
 
     return pd.DataFrame(
-        prototype_rows + kpis + rpn_rows + category_rows + coverage_rows + owner_rows,
+        prototype_rows + kpis + footnote_rows + coverage_score_rows + rpn_rows + category_rows + coverage_rows + owner_rows,
         columns=["Section", "Metric", "Value", "Comparison Value"],
     )
 
@@ -1638,12 +1726,28 @@ def management_summary_dataframe(
     high_priority_gaps = len(gap_df[gap_df["Priority"].eq("High")]) if not gap_df.empty else 0
     rows = [
         (
-            "Pilot Objective",
-            "Evaluate whether an AI assistant can reduce DFMEA/DVP&R preparation time, improve validation coverage, and identify high-risk gaps for BIW sheet metal components.",
+            "Executive Summary",
+            "This proof of concept demonstrates an AI-assisted workflow for BIW sheet metal DFMEA and DVP&R development.",
+        ),
+        (
+            "Tool Workflow",
+            "The tool takes structured component inputs and generates draft DFMEA failure modes, Severity, Occurrence, Detection, RPN, Action Priority, recommended actions, revised RPN, DVP&R validation recommendations, requirement-to-risk-to-test traceability, gap analysis, lessons learned suggestions, pilot metrics, and a management dashboard.",
         ),
         (
             "Prototype Demonstration",
-            f"For {inputs.get('component_name') or 'the selected BIW component'}, the assistant generated DFMEA risks, recommended DVP&R tests, calculated RPN and Action Priority, estimated residual risk reduction, mapped risks to validation coverage, and flagged open gaps.",
+            "The goal is not to replace engineering judgment. The goal is to reduce repetitive documentation effort, improve validation traceability, preserve lessons learned, and help engineers identify gaps earlier.",
+        ),
+        (
+            "Engineer Approval Boundary",
+            "The engineer remains the final approver.",
+        ),
+        (
+            "Demo Story",
+            DEMO_STORY,
+        ),
+        (
+            "Demo Story Takeaway",
+            "This shows that the AI assistant does more than generate text. It supports risk prioritization, validation planning, traceability, and engineering review.",
         ),
         ("Key Finding", f"{len(dfmea_df)} DFMEA failure modes generated."),
         ("Key Finding", f"{high_severity} high-severity risks identified."),
@@ -1652,16 +1756,24 @@ def management_summary_dataframe(
         ("Key Finding", f"{high_priority_gaps} high-priority validation gap or proposed closure item identified."),
         ("Key Finding", f"{len(lessons_df)} lessons learned reused."),
         (
-            "Prototype Mode",
-            "This proof-of-concept uses synthetic BIW engineering logic and generic DFMEA/DVP&R examples. It does not use confidential production program data.",
+            "Gap Closure Workflow",
+            GAP_WORKFLOW_NOTE,
         ),
         (
-            "Production Intent",
-            "A production version would run in an approved secure internal environment and use retrieval-augmented generation connected to approved BIW DFMEA, DVP&R, CAE, validation, manufacturing, quality, and lessons-learned documents.",
+            "Prototype Boundary",
+            PROTOTYPE_BOUNDARY_STATEMENT,
+        ),
+        (
+            "Action Priority Boundary",
+            ACTION_PRIORITY_DISCLAIMER,
         ),
         (
             "Engineering Control",
             "The AI assistant only drafts, recommends, links, and flags gaps. The responsible engineer remains the final approver for all DFMEA and DVP&R content.",
+        ),
+        (
+            "Final Pitch Positioning",
+            FINAL_PITCH_POSITIONING,
         ),
         (
             "Next Step",
@@ -1691,6 +1803,16 @@ def settings_dataframe() -> pd.DataFrame:
         ("Coverage Score Logic", "70", "Covered with one strong validation method"),
         ("Coverage Score Logic", "50", "Partial coverage"),
         ("Coverage Score Logic", "0", "No linked validation"),
+        ("Coverage Score Logic", "Note", "Coverage score reflects validation maturity: covered, proposed, partial, or missing validation coverage."),
+        ("Gap Status Logic", "Open", "No validation test is linked"),
+        ("Gap Status Logic", "Proposed", "AI has proposed a closure test, but engineer has not accepted it"),
+        ("Gap Status Logic", "Accepted", "Engineer accepted the proposed validation test"),
+        ("Gap Status Logic", "In Progress", "Validation test is planned or being executed"),
+        ("Gap Status Logic", "Closed", "Validation evidence is linked and accepted"),
+        ("Gap Status Logic", "Waived", "Engineer-approved waiver with rationale"),
+        ("Prototype Boundary", "Prototype Statement", PROTOTYPE_BOUNDARY_STATEMENT),
+        ("Action Priority Boundary", "Prototype Disclaimer", ACTION_PRIORITY_DISCLAIMER),
+        ("Gap Closure Boundary", "Engineer Acceptance Required", GAP_WORKFLOW_NOTE),
         ("Risk Category List", "Categories", ", ".join(RISK_CATEGORIES)),
         ("Validation Status Values", "Values", ", ".join(VALIDATION_STATUS_VALUES)),
         ("Engineer Decision Values", "Values", ", ".join(ENGINEER_DECISION_VALUES)),
@@ -1745,6 +1867,13 @@ def pilot_metrics_dataframe(
     return pd.DataFrame(rows, columns=["Metric", "Description", "Value"])
 
 
+def pitch_readiness_checklist_dataframe() -> pd.DataFrame:
+    return pd.DataFrame(
+        [("[ ]", item, "Review before management pitch") for item in PITCH_READINESS_ITEMS],
+        columns=["Complete", "Checklist Item", "Notes"],
+    )
+
+
 def workbook_tables(
     inputs: dict[str, str],
     dfmea_df: pd.DataFrame,
@@ -1753,17 +1882,19 @@ def workbook_tables(
     gap_df: pd.DataFrame,
     lessons_df: pd.DataFrame,
 ) -> dict[str, pd.DataFrame]:
+    sorted_dvp_df = sort_dvp_by_test_id(dvp_df)
     return {
-        "Dashboard": dashboard_dataframe(dfmea_df, dvp_df, trace_df, gap_df, lessons_df),
         "Management Summary": management_summary_dataframe(inputs, dfmea_df, dvp_df, trace_df, gap_df, lessons_df),
+        "Dashboard": dashboard_dataframe(dfmea_df, sorted_dvp_df, trace_df, gap_df, lessons_df),
         "Component Input": component_input_dataframe(inputs),
         "DFMEA": dfmea_df,
-        "DVP&R": dvp_df,
+        "DVP&R": sorted_dvp_df,
         "Traceability": trace_df,
         "Gap Analysis": gap_df,
         "Lessons Learned": lessons_df,
         "Pilot Metrics": pilot_metrics_dataframe(dfmea_df, dvp_df, trace_df, gap_df, lessons_df),
         "Settings": settings_dataframe(),
+        "Pitch Readiness Checklist": pitch_readiness_checklist_dataframe(),
     }
 
 
@@ -1778,8 +1909,8 @@ def build_report(
     dashboard = dashboard_dataframe(dfmea_df, dvp_df, trace_df, gap_df, lessons_df)
     percent_metrics = {
         "Estimated RPN Reduction %",
-        "Overall Validation Coverage %",
-        "High-Severity Validation Coverage %",
+        "Overall Validation Coverage Score",
+        "High-Severity Validation Coverage Score",
     }
 
     def format_kpi(metric: str, value: Any) -> str:
@@ -1804,6 +1935,10 @@ def build_report(
 
 {DISCLAIMER}
 
+{PROTOTYPE_BOUNDARY_STATEMENT}
+
+{ACTION_PRIORITY_DISCLAIMER}
+
 ## Component Summary
 
 - Component name: {inputs.get("component_name") or "Not specified"}
@@ -1820,9 +1955,19 @@ def build_report(
 
 {chr(10).join(kpi_lines)}
 
+## Demo Story
+
+{DEMO_STORY}
+
+## Dashboard Footnotes
+
+{chr(10).join(f"- {note}" for note in DASHBOARD_FOOTNOTES)}
+
 ## Open Gap Items
 
 {chr(10).join(gap_lines)}
+
+{GAP_WORKFLOW_NOTE}
 
 ## Recommended Next Steps
 
@@ -1858,6 +2003,31 @@ def apply_status_fills(ws, header_name: str, fill_map: dict[str, PatternFill]) -
                 ws.cell(row=row, column=cell_col).fill = fill
 
 
+def apply_rpn_range_fills(ws, header_names: list[str], high_fill: PatternFill, medium_fill: PatternFill, low_fill: PatternFill) -> None:
+    headers = [cell.value for cell in ws[1]]
+    for header_name in header_names:
+        if header_name not in headers:
+            continue
+        col = headers.index(header_name) + 1
+        for row in range(2, ws.max_row + 1):
+            value = ws.cell(row=row, column=col).value
+            try:
+                rpn = float(value)
+            except (TypeError, ValueError):
+                continue
+            if rpn >= 150:
+                ws.cell(row=row, column=col).fill = high_fill
+            elif rpn >= 100:
+                ws.cell(row=row, column=col).fill = medium_fill
+            else:
+                ws.cell(row=row, column=col).fill = low_fill
+
+
+def set_series_titles(chart: BarChart | PieChart, titles: list[str]) -> None:
+    for series, title in zip(chart.series, titles):
+        series.tx = SeriesLabel(v=title)
+
+
 def add_dashboard_charts(workbook) -> None:
     ws = workbook["Dashboard"]
     sections: dict[str, tuple[int, int]] = {}
@@ -1883,6 +2053,7 @@ def add_dashboard_charts(workbook) -> None:
         cats = Reference(ws, min_col=2, min_row=start + 1, max_row=end)
         chart.add_data(data, titles_from_data=True)
         chart.set_categories(cats)
+        set_series_titles(chart, ["Initial RPN", "Revised RPN"])
         chart.height = 7
         chart.width = 16
         ws.add_chart(chart, "F2")
@@ -1897,9 +2068,25 @@ def add_dashboard_charts(workbook) -> None:
         cats = Reference(ws, min_col=2, min_row=start + 1, max_row=end)
         chart.add_data(data, titles_from_data=True)
         chart.set_categories(cats)
+        set_series_titles(chart, ["Initial RPN"])
         chart.height = 7
         chart.width = 15
         ws.add_chart(chart, "F18")
+
+    if "Coverage Score Header" in sections:
+        start, end = sections["Coverage Score Header"]
+        chart = BarChart()
+        chart.title = "Validation Coverage Score"
+        chart.y_axis.title = "Coverage Score"
+        chart.x_axis.title = "Coverage Measure"
+        data = Reference(ws, min_col=3, min_row=start, max_row=end)
+        cats = Reference(ws, min_col=2, min_row=start + 1, max_row=end)
+        chart.add_data(data, titles_from_data=True)
+        chart.set_categories(cats)
+        set_series_titles(chart, ["Validation Coverage Score"])
+        chart.height = 7
+        chart.width = 15
+        ws.add_chart(chart, "F34")
 
     if "Coverage Status Header" in sections:
         start, end = sections["Coverage Status Header"]
@@ -1909,9 +2096,10 @@ def add_dashboard_charts(workbook) -> None:
         labels = Reference(ws, min_col=2, min_row=start + 1, max_row=end)
         chart.add_data(data, titles_from_data=True)
         chart.set_categories(labels)
+        set_series_titles(chart, ["Coverage Status"])
         chart.height = 7
         chart.width = 10
-        ws.add_chart(chart, "F34")
+        ws.add_chart(chart, "F50")
 
     if "Risk Category Header" in sections:
         start, end = sections["Risk Category Header"]
@@ -1923,6 +2111,7 @@ def add_dashboard_charts(workbook) -> None:
         cats = Reference(ws, min_col=2, min_row=start + 1, max_row=end)
         chart.add_data(data, titles_from_data=True)
         chart.set_categories(cats)
+        set_series_titles(chart, ["Failure Mode Count"])
         chart.height = 7
         chart.width = 15
         ws.add_chart(chart, "P2")
@@ -1937,6 +2126,7 @@ def add_dashboard_charts(workbook) -> None:
         cats = Reference(ws, min_col=2, min_row=start + 1, max_row=end)
         chart.add_data(data, titles_from_data=True)
         chart.set_categories(cats)
+        set_series_titles(chart, ["Open Action Count"])
         chart.height = 7
         chart.width = 15
         ws.add_chart(chart, "P18")
@@ -1950,7 +2140,10 @@ def format_excel_workbook(writer: pd.ExcelWriter, tables: dict[str, pd.DataFrame
     medium_fill = PatternFill("solid", fgColor="FFF2CC")
     low_fill = PatternFill("solid", fgColor="D9EAD3")
     partial_fill = PatternFill("solid", fgColor="FFF2CC")
-    proposed_fill = PatternFill("solid", fgColor="D9EAF7")
+    proposed_fill = PatternFill("solid", fgColor="FCE4D6")
+    accepted_fill = PatternFill("solid", fgColor="D9EAF7")
+    waived_fill = PatternFill("solid", fgColor="D9D9D9")
+    failed_fill = PatternFill("solid", fgColor="F4CCCC")
     draft_fill = PatternFill("solid", fgColor="EADCF8")
     card_fill = PatternFill("solid", fgColor="EAF2F8")
     prototype_fill = PatternFill("solid", fgColor="FCE4D6")
@@ -1977,13 +2170,66 @@ def format_excel_workbook(writer: pd.ExcelWriter, tables: dict[str, pd.DataFrame
             "Coverage Status",
             {"Gap": high_fill, "Partial": partial_fill, "Proposed Coverage": proposed_fill, "Covered": low_fill},
         )
+        apply_status_fills(
+            ws,
+            "Gap Status",
+            {
+                "Open": high_fill,
+                "Proposed": proposed_fill,
+                "Accepted": accepted_fill,
+                "In Progress": medium_fill,
+                "Closed": low_fill,
+                "Waived": waived_fill,
+            },
+        )
+        apply_status_fills(
+            ws,
+            "Gap Closure Status",
+            {
+                "Open": high_fill,
+                "Proposed": proposed_fill,
+                "Accepted": accepted_fill,
+                "In Progress": medium_fill,
+                "Closed": low_fill,
+                "Waived": waived_fill,
+            },
+        )
+        apply_status_fills(
+            ws,
+            "Final Gap Closure Status",
+            {
+                "Open": high_fill,
+                "Proposed": proposed_fill,
+                "Accepted": accepted_fill,
+                "In Progress": medium_fill,
+                "Closed": low_fill,
+                "Waived": waived_fill,
+            },
+        )
+        apply_status_fills(
+            ws,
+            "Validation Status",
+            {
+                "Planned": accepted_fill,
+                "Proposed": proposed_fill,
+                "In Progress": medium_fill,
+                "Passed": low_fill,
+                "Failed": failed_fill,
+                "Waived": waived_fill,
+                "Blocked": high_fill,
+            },
+        )
         apply_status_fills(ws, "Approval Status", {"Draft": draft_fill})
+        apply_rpn_range_fills(ws, ["RPN", "Initial RPN", "Revised RPN"], high_fill, medium_fill, low_fill)
 
         add_dropdown(ws, "Action Status", ACTION_STATUS_VALUES)
         add_dropdown(ws, "Validation Level", VALIDATION_LEVEL_VALUES)
         add_dropdown(ws, "Build Phase", BUILD_PHASE_VALUES)
         add_dropdown(ws, "Pass / Fail", PASS_FAIL_VALUES)
         add_dropdown(ws, "Validation Status", VALIDATION_STATUS_VALUES)
+        add_dropdown(ws, "Gap Status", GAP_STATUS_VALUES)
+        add_dropdown(ws, "Gap Closure Status", GAP_STATUS_VALUES)
+        add_dropdown(ws, "Final Gap Closure Status", GAP_STATUS_VALUES)
         add_dropdown(ws, "Engineer Decision", ENGINEER_DECISION_VALUES)
         add_dropdown(ws, "Approval Status", APPROVAL_STATUS_VALUES)
         add_dropdown(ws, "Rejection Reason", REJECTION_REASON_VALUES)
@@ -2019,8 +2265,8 @@ def format_excel_workbook(writer: pd.ExcelWriter, tables: dict[str, pd.DataFrame
         if sheet_name == "Dashboard":
             percent_metrics = {
                 "Estimated RPN Reduction %",
-                "Overall Validation Coverage %",
-                "High-Severity Validation Coverage %",
+                "Overall Validation Coverage Score",
+                "High-Severity Validation Coverage Score",
             }
             for row in range(2, ws.max_row + 1):
                 section = ws.cell(row=row, column=1).value
@@ -2033,6 +2279,11 @@ def format_excel_workbook(writer: pd.ExcelWriter, tables: dict[str, pd.DataFrame
                 if section == "Prototype Boundary":
                     for col in range(1, 5):
                         ws.cell(row=row, column=col).fill = prototype_fill
+                if section == "Dashboard Footnote":
+                    for col in range(1, 5):
+                        ws.cell(row=row, column=col).fill = low_fill
+                if section == "Coverage Score":
+                    ws.cell(row=row, column=3).number_format = "0.0%"
                 if metric in percent_metrics:
                     ws.cell(row=row, column=3).number_format = "0.0%"
             ws.column_dimensions["A"].width = 24
@@ -2052,6 +2303,13 @@ def format_excel_workbook(writer: pd.ExcelWriter, tables: dict[str, pd.DataFrame
             for row in range(2, ws.max_row + 1):
                 ws.cell(row=row, column=1).fill = card_fill
                 ws.cell(row=row, column=1).font = Font(bold=True)
+
+        if sheet_name == "Pitch Readiness Checklist":
+            ws.column_dimensions["A"].width = 14
+            ws.column_dimensions["B"].width = 48
+            ws.column_dimensions["C"].width = 36
+            for row in range(2, ws.max_row + 1):
+                ws.cell(row=row, column=1).fill = card_fill
 
     add_dashboard_charts(workbook)
 
@@ -2231,7 +2489,7 @@ def render_traceability() -> None:
     c2.metric("Covered", safe_count(trace_df, "Coverage Status", "Covered"))
     c3.metric("Partial", safe_count(trace_df, "Coverage Status", "Partial"))
     c4.metric("Gaps", safe_count(trace_df, "Coverage Status", "Gap"))
-    c5.metric("Coverage", f"{mean_numeric(trace_df, 'Coverage Score'):.0f}%")
+    c5.metric("Coverage Score", f"{mean_numeric(trace_df, 'Coverage Score'):.0f}%")
     st.dataframe(trace_df, width="stretch", hide_index=True)
     st.download_button("Download Traceability CSV", dataframe_to_csv(trace_df), "traceability.csv", "text/csv")
 

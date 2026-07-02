@@ -79,15 +79,17 @@ The sidebar option `Show intentional demo gap` creates a management-friendly bef
 
 The Excel workbook includes:
 
-- `Dashboard`: management-facing KPIs, coverage scores, and charts.
+- `Management Summary`: executive-friendly proof-of-concept summary, demo story, prototype boundary, Action Priority disclaimer, and engineer approval boundary.
+- `Dashboard`: management-facing KPIs, coverage scores, explanatory footnotes, and renamed chart legends.
 - `Component Input`: original engineer input, program phase, engineer name, generated date, and tool version.
 - `DFMEA`: editable draft risk table with review status fields.
-- `DVP&R`: validation recommendations with Test IDs, execution fields, status, results, and evidence links.
+- `DVP&R`: validation recommendations with sorted Test IDs, execution fields, status, results, and evidence links.
 - `Traceability`: requirement, function, failure mode, and test linkage with coverage score.
-- `Gap Analysis`: focused list of missing or partial validation coverage.
+- `Gap Analysis`: focused list of missing or partial validation coverage with explicit gap status, AI-recommended closure test, engineer decision, approval status, evidence link, and final closure status.
 - `Lessons Learned`: synthetic lessons learned with future RAG citation placeholders.
 - `Pilot Metrics`: pilot time-savings and suggestion-quality metrics.
-- `Settings`: rating scales, RPN logic, Action Priority logic, coverage scoring, and dropdown values.
+- `Settings`: rating scales, RPN logic, Action Priority logic, coverage scoring, gap status definitions, disclaimers, and dropdown values.
+- `Pitch Readiness Checklist`: final review checklist before a management presentation.
 
 ## Important Limitations
 
