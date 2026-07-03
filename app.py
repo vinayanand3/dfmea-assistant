@@ -925,13 +925,29 @@ def generate_p_diagram(inputs: dict[str, str]) -> pd.DataFrame:
     for factor in control_factors:
         rows.append(("Control Factor", "Design Parameter", factor))
 
-    rows.append(("Noise: Piece-to-Piece Variation", "Noise Factor", "Stamping thickness/springback variation, weld nugget variation, adhesive bead variation, fixture variation"))
-    rows.append(("Noise: Changes Over Time", "Noise Factor", "Fatigue damage accumulation, corrosion progression, adhesive aging, joint relaxation"))
+    piece_noise = ["Stamping thickness and springback variation", "fixture and locating variation"]
+    if ctx.has_any(["weld"]):
+        piece_noise.insert(1, "weld nugget size and pitch variation")
+    if ctx.has_any(["adhesive", "bond"]):
+        piece_noise.append("adhesive bead placement and bond gap variation")
+    if ctx.has_any(["fastener", "bolt", "bracket", "mount"]):
+        piece_noise.append("fastener torque and hole position variation")
+    rows.append(("Noise: Piece-to-Piece Variation", "Noise Factor", ", ".join(piece_noise).capitalize()))
+
+    time_noise = ["Fatigue damage accumulation", "joint relaxation"]
+    if ctx.has_any(["corrosion", "underbody", "salt", "splash"]):
+        time_noise.insert(1, "corrosion progression")
+    if ctx.has_any(["adhesive", "bond"]):
+        time_noise.append("adhesive aging and environmental degradation")
+    rows.append(("Noise: Changes Over Time", "Noise Factor", ", ".join(time_noise).capitalize()))
     rows.append(("Noise: Customer Usage", "Noise Factor", "Severe road inputs, overload events, towing/payload extremes, high-mileage duty cycles"))
     rows.append(("Noise: External Environment", "Noise Factor", inputs.get("environmental_exposure") or "Temperature cycling, humidity, road salt, stone impingement"))
     rows.append(("Noise: System Interaction", "Noise Factor", inputs.get("interfaces") or "Load and tolerance interaction with mating body structure"))
 
-    error_states = ["Dimensional variation beyond tolerance during body build"]
+    error_states = [
+        "Loss or degradation of the primary load transfer function (intended output not achieved)",
+        "Dimensional variation beyond tolerance during body build",
+    ]
     if ctx.has_any(["fatigue", "durability", "torsional"]):
         error_states.append("Fatigue crack initiation at stress concentration")
     if ctx.has_any(["weld", "spot weld"]):
