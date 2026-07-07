@@ -4,3 +4,7 @@ openpyxl>=3.1
 numpy>=1.24
 sentence-transformers>=2.6
 pypdf>=4.0
+python-docx>=1.1
+# Optional LLM providers for RAG_LLM_PROVIDER (see .env.example):
+# anthropic>=0.34
+# openai>=1.30

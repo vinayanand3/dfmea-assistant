@@ -18,7 +18,7 @@ from openpyxl.utils import get_column_letter
 
 
 APP_TITLE = "BIW DFMEA-DVP&R AI Assistant"
-TOOL_VERSION = "MVP-0.5"
+TOOL_VERSION = "MVP-0.6"
 PARTS_DIR = Path(__file__).parent / "examples" / "parts"
 DISCLAIMER = (
     "Draft engineering content for review only. All DFMEA, DVP&R, rating, "
@@ -147,6 +147,13 @@ DFMEA_COLUMNS = [
     "Human Review Required",
     "Reason for Human Review",
     "Future RAG Citation",
+    "Source Evidence",
+    "Source File",
+    "Source Sheet",
+    "Source Row",
+    "Source Chunk ID",
+    "AI Confidence",
+    "Review Status",
     "Engineer Decision",
     "Rejection Reason",
     "Final Approved Text",
@@ -193,6 +200,13 @@ DVP_COLUMNS = [
     "Human Review Required",
     "Reason for Human Review",
     "Future RAG Citation",
+    "Source Evidence",
+    "Source File",
+    "Source Sheet",
+    "Source Row",
+    "Source Chunk ID",
+    "AI Confidence",
+    "Review Status",
     "Engineer Decision",
     "Rejection Reason",
     "Final Approved Text",
@@ -299,6 +313,13 @@ LESSON_COLUMNS = [
     "Human Review Required",
     "Reason for Human Review",
     "Future RAG Citation",
+    "Source Evidence",
+    "Source File",
+    "Source Sheet",
+    "Source Row",
+    "Source Chunk ID",
+    "AI Confidence",
+    "Review Status",
     "Rejection Reason",
     "Final Approved Text",
     "Reviewed By",
@@ -371,15 +392,21 @@ DEMO_INPUTS = PART_EXAMPLES.get(DEFAULT_PART_LABEL, {})
 # --------------------------------------------------------------------------- RAG
 try:
     from rag import VectorStore, load_file_to_chunks
+    from rag import config as rag_config
+    from rag.llm import generate_llm_enrichment, llm_status
+    from rag.prompt_builder import build_rag_prompt
     from rag.retriever import best_match_for_row, citation_label, retrieve_groups
 
     RAG_IMPORT_ERROR = ""
+    VECTOR_DB_PATH = Path(rag_config.VECTOR_DB_PATH)
+    if not VECTOR_DB_PATH.is_absolute():
+        VECTOR_DB_PATH = Path(__file__).parent / rag_config.VECTOR_DB_PATH
 except Exception as _rag_exc:  # keeps the app usable if RAG deps are missing
     RAG_IMPORT_ERROR = str(_rag_exc)
+    VECTOR_DB_PATH = Path(__file__).parent / "data" / "vector_store"
 
 KB_SEED_DIR = Path(__file__).parent / "data" / "knowledge_base"
 KB_UPLOAD_DIR = Path(__file__).parent / "data" / "uploaded_docs"
-VECTOR_DB_PATH = Path(__file__).parent / "data" / "vector_store"
 RAG_DISCLAIMER = (
     "RAG results are used as engineering reference only. Engineer review and approval "
     "are required before release."
@@ -470,8 +497,11 @@ def _ground_frame(
         if match is None:
             if "Future RAG Citation" in df.columns:
                 df.at[idx, "Future RAG Citation"] = RAG_FALLBACK_LABEL
+            if "Source Evidence" in df.columns:
+                df.at[idx, "Source Evidence"] = RAG_FALLBACK_LABEL
             continue
         meta = match.get("metadata", {})
+        confidence = _confidence_from_similarity(match["similarity"])
         if "Future RAG Citation" in df.columns:
             df.at[idx, "Future RAG Citation"] = citation_label(match)
         if "Source Type" in df.columns:
@@ -481,7 +511,22 @@ def _ground_frame(
         if "Citation Count" in df.columns:
             df.at[idx, "Citation Count"] = 1
         if "AI Confidence Score" in df.columns:
-            df.at[idx, "AI Confidence Score"] = _confidence_from_similarity(match["similarity"])
+            df.at[idx, "AI Confidence Score"] = confidence
+        # Roadmap source schema
+        if "Source Evidence" in df.columns:
+            df.at[idx, "Source Evidence"] = str(match.get("chunk_text", ""))[:180]
+        if "Source File" in df.columns:
+            df.at[idx, "Source File"] = meta.get("file_name", "")
+        if "Source Sheet" in df.columns:
+            df.at[idx, "Source Sheet"] = meta.get("sheet_name", "")
+        if "Source Row" in df.columns:
+            df.at[idx, "Source Row"] = meta.get("row_number", "")
+        if "Source Chunk ID" in df.columns:
+            df.at[idx, "Source Chunk ID"] = match.get("chunk_id", "")
+        if "AI Confidence" in df.columns:
+            df.at[idx, "AI Confidence"] = confidence
+        if "Review Status" in df.columns:
+            df.at[idx, "Review Status"] = "Draft - source grounded"
         retrieved_log.append(
             {
                 "Query ID": f"Q-{generation_type[:5].upper()}-{len(retrieved_log) + 1:03d}",
@@ -564,6 +609,210 @@ def ground_with_rag(
         return dfmea_df, dvp_df, lessons_df, empty_log
 
 
+def apply_llm_enrichment(
+    dfmea_df: pd.DataFrame,
+    dvp_df: pd.DataFrame,
+    inputs: dict[str, str],
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    """Optional roadmap Phase 7-8: LLM generation from retrieved context.
+
+    Off unless RAG_LLM_PROVIDER is configured. All LLM rows are schema-validated,
+    citation-checked against real chunk IDs, appended as clearly-labeled
+    'LLM + RAG' suggestions, and require engineer review.
+    """
+    store = get_rag_store()
+    retrieved = retrieve_groups(store, inputs)
+    known_chunks: dict[str, dict[str, Any]] = {}
+    for group in retrieved.values():
+        for match in group:
+            known_chunks[match["chunk_id"]] = match
+    prompt = build_rag_prompt(
+        inputs,
+        retrieved,
+        baseline_failure_modes=[str(x) for x in dfmea_df.get("Potential Failure Mode", pd.Series(dtype=str))],
+        baseline_tests=[str(x) for x in dvp_df.get("Recommended Validation Test", pd.Series(dtype=str))],
+    )
+    llm_dfmea, llm_dvpr, notes = generate_llm_enrichment(prompt, set(known_chunks))
+
+    def _source_fields(chunk_ids: list[str]) -> dict[str, Any]:
+        if not chunk_ids:
+            return {
+                "Source Evidence": "LLM suggestion without retrieved source - requires engineer verification",
+                "AI Confidence": 0.5,
+                "AI Confidence Score": 0.5,
+            }
+        match = known_chunks[chunk_ids[0]]
+        meta = match.get("metadata", {})
+        conf = _confidence_from_similarity(match["similarity"])
+        return {
+            "Source Evidence": str(match.get("chunk_text", ""))[:180],
+            "Source File": meta.get("file_name", ""),
+            "Source Sheet": meta.get("sheet_name", ""),
+            "Source Row": meta.get("row_number", ""),
+            "Source Chunk ID": match.get("chunk_id", ""),
+            "Source Strength": meta.get("source_strength", "Unknown"),
+            "Citation Count": len(chunk_ids),
+            "Future RAG Citation": citation_label(match),
+            "AI Confidence": conf,
+            "AI Confidence Score": conf,
+        }
+
+    new_dfmea_rows = []
+    for i, row in enumerate(llm_dfmea, start=1):
+        base = dfmea_row(
+            inputs,
+            str(row["failure_mode"]),
+            str(row["effect"]),
+            int(row["severity"]),
+            str(row["cause"]),
+            int(row["occurrence"]),
+            str(row.get("prevention_control", "Engineer to define prevention control")),
+            str(row.get("detection_control", "Engineer to define detection control")),
+            int(row["detection"]),
+            str(row["recommended_action"]),
+            str(row.get("owner", "BIW")),
+            str(row.get("rationale", "LLM-suggested from retrieved context")),
+        )
+        base.update(
+            {
+                "Failure Mode ID": f"FM-AI-{i:02d}",
+                "Action ID": f"ACT-AI-{i:02d}",
+                "AI Suggestion ID": f"AI-LLM-DFMEA-{i:03d}",
+                "Source Type": "LLM + RAG",
+                "Review Status": "Under Review - LLM suggestion",
+                "Human Review Required": "Yes",
+                "Reason for Human Review": "LLM-generated suggestion",
+                "Change Log": "Generated by LLM from retrieved context; pending engineer review.",
+            }
+        )
+        base.update(_source_fields(row.get("source_chunk_ids", [])))
+        new_dfmea_rows.append(base)
+
+    new_dvp_rows = []
+    if not dfmea_df.empty or new_dfmea_rows:
+        lookup_df = pd.concat([dfmea_df, pd.DataFrame(new_dfmea_rows, columns=DFMEA_COLUMNS)]) if new_dfmea_rows else dfmea_df
+        for i, row in enumerate(llm_dvpr, start=1):
+            linked = str(row["linked_failure_mode"])
+            matches = lookup_df[lookup_df["Potential Failure Mode"].astype(str).str.lower() == linked.lower()]
+            anchor = matches.iloc[0] if not matches.empty else lookup_df.iloc[0]
+            base = dvp_row(
+                anchor,
+                str(row["test"]),
+                str(row.get("validation_type", "Physical")),
+                str(row["objective"]),
+                str(row["acceptance_criteria"]),
+                str(row.get("team", "BIW / Validation")),
+                str(row.get("rationale", "LLM-suggested from retrieved context")),
+                validation_status="Proposed",
+                test_id=f"TEST-AI-{i:02d}",
+            )
+            base.update(
+                {
+                    "AI Suggestion ID": f"AI-LLM-DVPR-{i:03d}",
+                    "Source Type": "LLM + RAG",
+                    "Review Status": "Under Review - LLM suggestion",
+                    "Human Review Required": "Yes",
+                    "Reason for Human Review": "LLM-generated suggestion",
+                    "Change Log": "Generated by LLM from retrieved context; pending engineer review.",
+                }
+            )
+            base.update(_source_fields(row.get("source_chunk_ids", [])))
+            new_dvp_rows.append(base)
+
+    if new_dfmea_rows:
+        dfmea_df = pd.concat([dfmea_df, pd.DataFrame(new_dfmea_rows, columns=DFMEA_COLUMNS)], ignore_index=True)
+    if new_dvp_rows:
+        dvp_df = pd.concat([dvp_df, pd.DataFrame(new_dvp_rows, columns=DVP_COLUMNS)], ignore_index=True)
+    return dfmea_df, dvp_df, notes
+
+
+def augment_gap_analysis(
+    gap_df: pd.DataFrame,
+    dfmea_df: pd.DataFrame,
+    dvp_df: pd.DataFrame,
+    retrieved_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Add source-aware roadmap gap types on top of validation-coverage gaps."""
+    rows: list[dict[str, Any]] = []
+    next_id = len(gap_df) + 1
+
+    def add(gap_type: str, description: str, fix: str, severity: int = 0, failure_mode: str = "", fm_id: str = "", priority: str = "Medium") -> None:
+        nonlocal next_id
+        rows.append(
+            {
+                "Gap ID": f"GAP-{next_id:03d}",
+                "Failure Mode ID": fm_id,
+                "Failure Mode": failure_mode,
+                "Severity": severity,
+                "Gap Type": gap_type,
+                "Gap Description": description,
+                "Recommended Fix": fix,
+                "Priority": priority,
+                "Status": "Open",
+                "Gap Status": "Open",
+                "Engineer Decision": "Pending",
+                "Gap Closure Status": "Open",
+                "Final Gap Closure Status": "Open",
+                "Approval Status": "Draft",
+            }
+        )
+        next_id += 1
+
+    if not dvp_df.empty and not dfmea_df.empty:
+        known_fm_ids = set(dfmea_df["Failure Mode ID"].astype(str))
+        for _, test in dvp_df.iterrows():
+            linked = str(test.get("Linked Failure Mode ID", "")).strip()
+            if linked and linked not in known_fm_ids:
+                add(
+                    "DVP&R test without linked DFMEA risk",
+                    f"Test {test.get('Test ID', '?')} ({test.get('Recommended Validation Test', '')}) links to unknown failure mode ID {linked}.",
+                    "Re-link the test to a valid DFMEA failure mode or remove it.",
+                )
+        dfmea_reqs = set(dfmea_df["Requirement ID"].astype(str)) - {""}
+        dvp_reqs = set(dvp_df["Requirement ID"].astype(str)) - {""}
+        for req in sorted(dfmea_reqs - dvp_reqs):
+            add(
+                "Requirement without linked validation",
+                f"Requirement {req} appears in the DFMEA but has no DVP&R test linked to it.",
+                "Add a validation test covering this requirement or document a waiver.",
+                priority="High",
+            )
+
+    if not dfmea_df.empty and "Source Chunk ID" in dfmea_df.columns:
+        high_risk = dfmea_df[(dfmea_df["Severity"] >= 8) & (dfmea_df["Source Chunk ID"].astype(str) == "")]
+        for _, row in high_risk.iterrows():
+            add(
+                "No source found for high-risk recommendation",
+                f"High-severity failure mode '{row['Potential Failure Mode']}' (S={row['Severity']}) has no retrieved source evidence.",
+                "Verify against historical DFMEAs and standards manually, or expand the knowledge base.",
+                severity=int(row["Severity"]),
+                failure_mode=str(row["Potential Failure Mode"]),
+                fm_id=str(row["Failure Mode ID"]),
+                priority="High",
+            )
+
+    if not retrieved_df.empty and not dfmea_df.empty:
+        used = set(dfmea_df.get("Source Chunk ID", pd.Series(dtype=str)).astype(str)) | set(
+            dvp_df.get("Source Chunk ID", pd.Series(dtype=str)).astype(str)
+        )
+        strong_context = retrieved_df[
+            (retrieved_df["Generation Type"].astype(str).str.startswith("Component context"))
+            & (retrieved_df["Similarity Score"].astype(float) >= 0.5)
+        ]
+        for _, src in strong_context.iterrows():
+            if str(src["Source Chunk ID"]) not in used:
+                add(
+                    "RAG source found but not used",
+                    f"Strong knowledge-base match ({src['Source File']} row {src['Source Row']}, similarity {src['Similarity Score']}) was retrieved but no generated row cites it.",
+                    "Review this source for a failure mode or validation item the draft may be missing.",
+                    priority="Medium",
+                )
+
+    if not rows:
+        return gap_df
+    return pd.concat([gap_df, pd.DataFrame(rows, columns=GAP_COLUMNS)], ignore_index=True)
+
+
 def kb_summary_dataframe() -> pd.DataFrame:
     rows: list[tuple[str, str]] = []
     if RAG_IMPORT_ERROR:
@@ -599,6 +848,8 @@ def init_state() -> None:
     st.session_state.setdefault("lessons_df", empty_df(LESSON_COLUMNS))
     st.session_state.setdefault("pdiag_df", empty_df(P_DIAGRAM_COLUMNS))
     st.session_state.setdefault("retrieved_sources_df", empty_df(RETRIEVED_SOURCES_COLUMNS))
+    st.session_state.setdefault("llm_enrich_mode", False)
+    st.session_state.setdefault("llm_notes", [])
     st.session_state.setdefault("last_generated", False)
     # Auto-seed the knowledge base so RAG works out of the box (incl. ephemeral HF Spaces).
     if not RAG_IMPORT_ERROR and not st.session_state.get("kb_seed_attempted"):
@@ -881,6 +1132,13 @@ def dfmea_row(
         "Human Review Required": review_required(reason),
         "Reason for Human Review": reason,
         "Future RAG Citation": "Not connected",
+        "Source Evidence": "",
+        "Source File": "",
+        "Source Sheet": "",
+        "Source Row": "",
+        "Source Chunk ID": "",
+        "AI Confidence": confidence,
+        "Review Status": "Draft",
         "Engineer Decision": "Pending",
         "Rejection Reason": "",
         "Final Approved Text": final_text,
@@ -1362,6 +1620,13 @@ def dvp_row(
         "Human Review Required": review_required(reason),
         "Reason for Human Review": reason,
         "Future RAG Citation": "Not connected",
+        "Source Evidence": "",
+        "Source File": "",
+        "Source Sheet": "",
+        "Source Row": "",
+        "Source Chunk ID": "",
+        "AI Confidence": confidence,
+        "Review Status": "Draft",
         "Engineer Decision": "Pending",
         "Rejection Reason": "",
         "Final Approved Text": f"{test}: {objective}",
@@ -1963,6 +2228,13 @@ def generate_lessons(dfmea_df: pd.DataFrame) -> pd.DataFrame:
                         "Human Review Required": review_required(reason),
                         "Reason for Human Review": reason,
                         "Future RAG Citation": "Not connected",
+                        "Source Evidence": "",
+                        "Source File": "",
+                        "Source Sheet": "",
+                        "Source Row": "",
+                        "Source Chunk ID": "",
+                        "AI Confidence": confidence,
+                        "Review Status": "Draft",
                         "Rejection Reason": "",
                         "Final Approved Text": lesson["Lesson Learned"],
                         "Reviewed By": "TBD",
@@ -1984,8 +2256,15 @@ def generate_all() -> None:
     gap_df = generate_gap_analysis(trace_df)
     lessons_df = generate_lessons(dfmea_df)
     dfmea_df, dvp_df, lessons_df, retrieved_df = ground_with_rag(dfmea_df, dvp_df, lessons_df, inputs)
+    if st.session_state.get("llm_enrich_mode") and not RAG_IMPORT_ERROR:
+        try:
+            dfmea_df, dvp_df, llm_notes = apply_llm_enrichment(dfmea_df, dvp_df, inputs)
+            st.session_state.llm_notes = llm_notes
+        except Exception as exc:
+            st.session_state.llm_notes = [f"LLM enrichment skipped: {exc}"]
     trace_df = generate_traceability(dfmea_df, dvp_df)
     gap_df = generate_gap_analysis(trace_df)
+    gap_df = augment_gap_analysis(gap_df, dfmea_df, dvp_df, retrieved_df)
     st.session_state.retrieved_sources_df = retrieved_df
     st.session_state.pdiag_df = generate_p_diagram(inputs)
     st.session_state.dfmea_df = dfmea_df
@@ -1998,7 +2277,13 @@ def generate_all() -> None:
 
 def refresh_downstream_from_edits() -> None:
     st.session_state.trace_df = generate_traceability(st.session_state.dfmea_df, st.session_state.dvp_df)
-    st.session_state.gap_df = generate_gap_analysis(st.session_state.trace_df)
+    gap_df = generate_gap_analysis(st.session_state.trace_df)
+    st.session_state.gap_df = augment_gap_analysis(
+        gap_df,
+        st.session_state.dfmea_df,
+        st.session_state.dvp_df,
+        st.session_state.get("retrieved_sources_df", empty_df(RETRIEVED_SOURCES_COLUMNS)),
+    )
     st.session_state.lessons_df = generate_lessons(st.session_state.dfmea_df)
 
 
@@ -2105,8 +2390,44 @@ def dashboard_dataframe(
         owner_rows = [("Open Actions by Owner", owner, int(count), "") for owner, count in owner_counts.items()]
         owner_rows.insert(0, ("Open Actions Header", "Action Owner", "Open Action Count", ""))
 
+    # RAG knowledge-layer KPIs (roadmap Phase 13) - exported with the Dashboard sheet
+    rag_rows: list[tuple[str, str, Any, str]] = []
+    if not RAG_IMPORT_ERROR:
+        try:
+            stats = get_rag_store().get_collection_stats()
+            retrieved_df = st.session_state.get("retrieved_sources_df", empty_df(RETRIEVED_SOURCES_COLUMNS))
+            dfmea_grounded = int((dfmea_df.get("Source Chunk ID", pd.Series(dtype=str)).astype(str) != "").sum()) if not dfmea_df.empty else 0
+            dvp_grounded = int((dvp_df.get("Source Chunk ID", pd.Series(dtype=str)).astype(str) != "").sum()) if not dvp_df.empty else 0
+            total_rows = len(dfmea_df) + len(dvp_df)
+            fallback_rows = total_rows - dfmea_grounded - dvp_grounded
+            high_risk_no_source = (
+                int(((dfmea_df["Severity"] >= 8) & (dfmea_df.get("Source Chunk ID", "").astype(str) == "")).sum())
+                if not dfmea_df.empty and "Source Chunk ID" in dfmea_df.columns
+                else 0
+            )
+            avg_conf = 0.0
+            if total_rows:
+                avg_conf = round(
+                    (mean_numeric(dfmea_df, "AI Confidence") * len(dfmea_df) + mean_numeric(dvp_df, "AI Confidence") * len(dvp_df))
+                    / total_rows,
+                    2,
+                )
+            sources_used = int((retrieved_df["Used In Output"].astype(str) == "Yes").sum()) if not retrieved_df.empty else 0
+            rag_rows = [
+                ("RAG KPI", "Total Documents Indexed", stats["documents"], ""),
+                ("RAG KPI", "Total Knowledge Chunks", stats["chunks"], ""),
+                ("RAG KPI", "RAG Sources Used", sources_used, ""),
+                ("RAG KPI", "DFMEA Rows with Source Evidence", dfmea_grounded, ""),
+                ("RAG KPI", "DVP&R Rows with Source Evidence", dvp_grounded, ""),
+                ("RAG KPI", "Rows Using Rule-Based Fallback", fallback_rows, ""),
+                ("RAG KPI", "High-Risk Items Without Source Evidence", high_risk_no_source, ""),
+                ("RAG KPI", "Average AI Confidence", avg_conf, ""),
+            ]
+        except Exception:
+            rag_rows = []
+
     return pd.DataFrame(
-        prototype_rows + kpis + footnote_rows + coverage_score_rows + rpn_rows + category_rows + coverage_rows + owner_rows,
+        prototype_rows + kpis + rag_rows + footnote_rows + coverage_score_rows + rpn_rows + category_rows + coverage_rows + owner_rows,
         columns=["Section", "Metric", "Value", "Comparison Value"],
     )
 
@@ -2718,7 +3039,7 @@ def format_excel_workbook(writer: pd.ExcelWriter, tables: dict[str, pd.DataFrame
             for row in range(2, ws.max_row + 1):
                 section = ws.cell(row=row, column=1).value
                 metric = ws.cell(row=row, column=2).value
-                if section == "KPI":
+                if section in ("KPI", "RAG KPI"):
                     for col in range(1, 5):
                         ws.cell(row=row, column=col).fill = card_fill
                     ws.cell(row=row, column=2).font = Font(bold=True)
@@ -2895,12 +3216,23 @@ def render_header() -> None:
         else:
             st.error("No example part files found in examples/parts.")
 
-        st.selectbox(
-            "Generation provider",
-            ["Rules-based MVP", "OpenAI enrichment later", "Secure RAG later"],
-            index=0,
-            disabled=True,
-        )
+        if RAG_IMPORT_ERROR:
+            st.caption("RAG layer unavailable - rules-based generation only.")
+        else:
+            llm_ok, llm_state = llm_status()
+            st.checkbox(
+                "Enable LLM enrichment (optional)",
+                key="llm_enrich_mode",
+                disabled=not llm_ok,
+                help=(
+                    "Off by default. When a provider is configured via .env (RAG_LLM_PROVIDER=anthropic or "
+                    "openai), the app sends retrieved context to the LLM for additional schema-validated, "
+                    "source-cited suggestions. All LLM rows require engineer review."
+                ),
+            )
+            st.caption(f"LLM provider: {llm_state}")
+            for note in st.session_state.get("llm_notes", [])[:3]:
+                st.caption(f"LLM note: {note}")
         st.checkbox(
             "Show intentional demo gap",
             key="demo_gap_mode",
@@ -2997,8 +3329,14 @@ def render_knowledge_base() -> None:
     up1, up2 = st.columns(2)
     with up1:
         doc_type = st.selectbox("Document type", RAG_DOC_TYPES, key="kb_doc_type")
+        component_hint = st.text_input(
+            "Component type (if known)",
+            key="kb_component_hint",
+            placeholder="e.g. Front rail reinforcement",
+        )
     with up2:
         strength = st.selectbox("Source strength", RAG_SOURCE_STRENGTHS, key="kb_source_strength")
+        upload_notes = st.text_input("Optional notes", key="kb_upload_notes", placeholder="e.g. anonymized P1 program data")
     uploads = st.file_uploader(
         "Files (.xlsx, .csv, .md, .txt, .pdf, .docx)",
         type=["xlsx", "csv", "md", "txt", "pdf", "docx"],
@@ -3012,6 +3350,11 @@ def render_knowledge_base() -> None:
             saved = KB_UPLOAD_DIR / file.name
             saved.write_bytes(file.getvalue())
             chunks = load_file_to_chunks(saved, doc_type, strength, file_bytes=file.getvalue())
+            for chunk in chunks:
+                if component_hint and not chunk["metadata"].get("component_name"):
+                    chunk["metadata"]["component_name"] = component_hint
+                if upload_notes:
+                    chunk["metadata"]["notes"] = upload_notes
             total += store.add_chunks(chunks)
         st.success(f"Indexed {total} new chunks from {len(uploads)} file(s). Duplicates were skipped.")
         st.rerun()

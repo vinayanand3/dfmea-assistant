@@ -60,6 +60,11 @@ def get_embedder():
     global _embedder_singleton
     if _embedder_singleton is not None:
         return _embedder_singleton
+    from . import config
+
+    if config.RAG_FORCE_FALLBACK_EMBEDDER:
+        _embedder_singleton = HashedBowEmbedder()
+        return _embedder_singleton
     try:
         _embedder_singleton = SentenceTransformerEmbedder()
     except Exception:

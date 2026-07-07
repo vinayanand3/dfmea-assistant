@@ -4,15 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import config
 from .store import VectorStore
 
-TOP_K_DFMEA = 5
-TOP_K_DVPR = 5
-TOP_K_LESSONS = 3
-TOP_K_STANDARDS = 3
+TOP_K_DFMEA = config.RAG_TOP_K_DFMEA
+TOP_K_DVPR = config.RAG_TOP_K_DVPR
+TOP_K_LESSONS = config.RAG_TOP_K_LESSONS
+TOP_K_STANDARDS = config.RAG_TOP_K_STANDARDS
 
 # Below this cosine similarity a match is treated as "no relevant source found".
-MIN_SIMILARITY = 0.30
+MIN_SIMILARITY = config.RAG_MIN_SIMILARITY
 
 
 def build_component_query(inputs: dict[str, str], extra: str = "") -> str:

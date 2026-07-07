@@ -24,6 +24,16 @@ This is a Streamlit MVP for creating first-pass BIW sheet metal DFMEA and DVP&R 
 - Includes source, RAG citation, reviewer, decision, and notes columns so later OpenAI and RAG suggestions can be tracked.
 - Loads example part definitions from separate JSON files under `examples/parts`.
 
+## What's New in MVP-0.6 (Roadmap validation fixes)
+
+- **Roadmap source schema** — DFMEA, DVP&R, and Lessons rows now carry `Source Evidence`, `Source File`, `Source Sheet`, `Source Row`, `Source Chunk ID`, `AI Confidence`, and `Review Status` as first-class columns (existing citation fields kept for compatibility). Fallback rows are explicitly labeled in `Source Evidence`.
+- **Optional LLM generation layer (off by default)** — set `RAG_LLM_PROVIDER=anthropic` or `openai` in `.env` to enable a sidebar toggle. Retrieved context goes through the roadmap Phase 7 prompt builder; LLM suggestions are schema-validated, invented chunk IDs are dropped, and rows are appended as clearly-labeled `LLM + RAG` suggestions requiring engineer review. Without a provider the app is fully deterministic.
+- **Environment configuration** — `.env.example` with `VECTOR_DB_PATH`, `RAG_TOP_K_*`, `RAG_MIN_SIMILARITY`, provider keys/models, and `RAG_FORCE_FALLBACK_EMBEDDER` for offline/CI runs.
+- **Source-aware gap analysis** — four new gap types: DVP&R test without linked DFMEA risk, requirement without linked validation, no source found for high-risk recommendation, and RAG source found but not used.
+- **Dashboard RAG KPIs in the export** — the workbook Dashboard sheet now includes the roadmap RAG KPI block (documents indexed, chunks, sources used, grounded rows, fallback rows, high-risk items without evidence, average AI confidence).
+- **Knowledge Base UI** — added component type and optional notes fields per the roadmap; `python-docx` added to requirements so DOCX uploads parse.
+- **Test suite** — `tests/test_rag.py` (12 tests) covering Excel/DFMEA/DVP&R chunking, metadata, duplicate skipping, retrieval, fallback, prompt building, LLM output validation, and end-to-end export. Run with `pytest tests/ -q`.
+
 ## What's New in MVP-0.5 (Local RAG knowledge layer)
 
 - **Knowledge Base tab** — upload engineering documents (.xlsx, .csv, .md, .txt, .pdf, .docx), assign document type and source strength, and index them into a local vector store. Includes a live search preview.
