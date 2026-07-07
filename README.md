@@ -95,17 +95,117 @@ Twelve tests cover document parsing, chunking, metadata, duplicate skipping, ret
 
 GitHub Pages cannot run this app directly because Streamlit requires a live Python server and GitHub Pages only serves static files. Use GitHub to store the code, then deploy the app with a Streamlit-capable host such as Streamlit Community Cloud, Render, Railway, Hugging Face Spaces, or an internal server.
 
-## How to Use the App (Tab by Tab)
+## Quick Start (2 Minutes)
 
-1. **Input** — pick one of the example parts from the sidebar (or this tab) and click `Load Selected Part`, or type your own component details. The auto-derived FMEA header (AIAG-VDA planning & preparation block) is shown in the expander. Keep `Show intentional demo gap` enabled in the sidebar for a management demo. Click `Generate Drafts`.
-2. **Knowledge Base** — see what the RAG layer knows. The synthetic corpus (prior-program DFMEAs, DVP&Rs, lessons learned, standards) is indexed automatically. Upload your own `.xlsx/.csv/.md/.txt/.pdf/.docx` files with a document type, source strength, component type, and notes, then click `Process files`. Use the search preview to check what would be retrieved. `Clear knowledge base` resets it; `Seed synthetic demo corpus` restores the demo data.
-3. **P-Diagram** — review the generated function analysis: ideal function, input signal, control factors, the five noise factor categories, and error states. Each error state should map to a DFMEA failure mode. Fully editable.
-4. **DFMEA** — review the draft risk table: S/O/D, RPN, AIAG-VDA Action Priority, YC/SC special-characteristic candidates, vehicle-level end effects, and recommended actions. Grounded rows show their source (file, sheet, row, chunk ID, similarity) in the source columns; ungrounded rows are labeled "No RAG source found - rule-based draft". Edit, add, or delete rows — downstream tabs refresh automatically.
-5. **DVP&R** — review recommended validation tests linked to each failure mode, with test stage (DV/PV/Virtual), validation level, build phase, sample size, acceptance criteria, and standard references. Editable like the DFMEA.
-6. **Traceability** — every failure mode mapped to its validation tests with a coverage status (Covered / Partial / Proposed / Gap) and coverage score. Click `Check Gaps` after manual edits.
-7. **Gaps** — the gap list with AI-proposed closure tests and engineer decision fields. Includes source-aware gap types such as high-severity risks without source evidence and strong knowledge-base matches not used by the draft.
-8. **Dashboard** — management KPIs (risk counts, RPN reduction, coverage scores) plus RAG KPIs (documents indexed, grounded rows, fallback rows, average AI confidence).
-9. **Export** — download the markdown pilot report or the formatted 15-sheet Excel workbook.
+If you only want to see what the app does:
+
+1. In the left sidebar, pick an example part (e.g. *Rear Floor Crossmember Reinforcement*) and click **Load Selected Part**.
+2. Click **Generate Drafts**.
+3. Walk the tabs left to right: the app builds a risk analysis (DFMEA), a test plan (DVP&R), a check that every risk has a test (Traceability), a list of problems it found (Gaps), and a summary (Dashboard).
+4. Open **Export** and download the Excel workbook — that is the document you would take into a design review.
+
+Everything below explains each tab in plain language: what it shows, how to read it, and what you get out of it.
+
+---
+
+## Plain-Language Glossary
+
+These five terms are enough to understand the whole app:
+
+- **DFMEA** (Design Failure Mode and Effects Analysis) — a structured worry list. For a part, it asks: *what could go wrong (failure mode), what would happen if it did (effect), why would it happen (cause), and how bad/likely/hard-to-catch is it?*
+- **S / O / D and RPN** — each risk gets three 1–10 scores: **S**everity (how bad), **O**ccurrence (how likely), **D**etection (how hard to catch before the customer sees it — higher is worse). Multiplied together they give the **RPN** (Risk Priority Number, max 1000). Bigger number = bigger worry.
+- **Action Priority (AP)** — the modern industry method (AIAG-VDA) for deciding which risks demand action: **H**igh, **M**edium, or **L**ow. It looks at severity first, so a dangerous-but-rare issue is not hidden by a low RPN.
+- **DVP&R** (Design Verification Plan and Report) — the test plan. For every risk in the DFMEA, it lists which test proves the design is OK, how many samples, what "pass" means, and who runs it.
+- **RAG** (Retrieval-Augmented Generation) — instead of inventing content, the app first searches a knowledge base of past engineering documents and cites what it found. Think of it as "show your sources."
+
+---
+
+## Tab-by-Tab Guide
+
+### Tab 1: Input — describe the part
+
+**What it is.** The starting point. You tell the app what part you are working on: its name, material, thickness, how it is joined (welds, adhesive), what loads it sees (crash, vibration), and what already worries you.
+
+**How to use it.** Easiest path: load one of the five built-in example parts and click **Generate Drafts**. You can also edit any field first — the app reacts to keywords, so writing "corrosion" in the concerns box will produce corrosion risks and corrosion tests downstream. The *FMEA header* expander shows the document's identity block (ID, responsible engineer, dates) — the cover page of the analysis.
+
+**What you get.** Nothing visible yet — this tab feeds every other tab. After clicking **Generate Drafts**, all remaining tabs fill in at once.
+
+### Tab 2: Knowledge Base — what the app "remembers"
+
+**What it is.** The app's library of past engineering documents: old risk analyses, old test plans, lessons learned, and standards. When the app drafts anything, it searches this library and cites matches. A demo library of synthetic (fake but realistic) documents is loaded automatically.
+
+**How to read it.** The four boxes at the top show how much the library contains (documents and "chunks" — searchable snippets). The table at the bottom (after a generation) lists exactly which sources the last draft used.
+
+**How to use it.** You can ignore this tab entirely and the app still works. To extend the library: choose a document type (e.g. *Historical DFMEA*), a source strength (how trustworthy it is), optionally the component it relates to and a note, then upload files and click **Process files**. Try the **search preview** box — type "weld fatigue" and see what the app would find.
+
+**What you get.** Better, source-backed drafts. Rows backed by a library match show exactly which file and row they came from — so a reviewer can check the source instead of trusting the tool.
+
+### Tab 3: P-Diagram — how the part is supposed to work
+
+**What it is.** A one-page description of the part's job: what it should do (*ideal function*), what goes into it (*input signal*: the loads), what the designer controls (*control factors*: material, thickness, welds), what the designer cannot control (*noise factors*: manufacturing variation, aging, rough roads, weather, neighboring parts), and what "going wrong" looks like (*error states*).
+
+**How to read it.** Read the Element column top to bottom — it tells the part's story. The three counters show how many control factors, noise categories, and error states were generated. Every error state should reappear as a risk on the DFMEA tab; that is the link between "how it works" and "how it fails."
+
+**What you get.** The engineering justification for the risk list. In a review, this is how you answer "why did you include that failure mode?"
+
+### Tab 4: DFMEA — the risk list
+
+**What it is.** The core output: one row per thing that could go wrong with the part.
+
+**How to read a row.** Read left to right as a sentence: *this part* (Item) *is supposed to do X* (Function), *but could fail like this* (Potential Failure Mode), *which would cause this* (Effect, and End Effect at the vehicle/customer level), *because of this* (Cause). Then the scores: Severity, Occurrence, Detection, RPN, and **AP (AIAG-VDA)** — if AP says **H**, that row needs attention. A **YC/SC** flag means the row is a candidate safety-critical or significant characteristic. **Recommended Action** says what to do about it; the **Revised** scores estimate the risk after that action.
+
+**Where the sources are.** Scroll right: *Source File / Sheet / Row* and *Source Evidence* show the historical record backing the row. If it says "No RAG source found - rule-based draft," the row came from built-in engineering rules and deserves closer human scrutiny.
+
+**How to use it.** Every cell is editable, and you can add or delete rows. Change a severity score and the downstream tabs recalculate automatically. The **Engineer Decision** column is where a reviewer records Accept / Modify / Reject.
+
+**What you get.** A downloadable draft DFMEA (CSV button below the table) that would normally take an engineer one to two days to assemble from old files.
+
+### Tab 5: DVP&R — the test plan
+
+**What it is.** One row per recommended test, each linked to the risk it covers.
+
+**How to read a row.** *Linked Failure Mode* is the risk being addressed. *Recommended Validation Test* is the test. *Test Stage* says when it happens (Virtual/CAE = computer simulation, DV = design verification on prototypes, PV = production validation on real production parts). *Sample Size*, *Acceptance Criteria*, and *Responsible Team* say how many parts, what counts as passing, and who owns it. Execution columns (dates, actual result, Pass/Fail, evidence link) are blank in a draft — they get filled as the program runs the tests.
+
+**What you get.** A draft validation plan (CSV download) with every test traceable to a specific risk — the structure quality auditors look for.
+
+### Tab 6: Traceability — does every risk have a test?
+
+**What it is.** The cross-check between the two previous tabs. Every DFMEA risk appears once, with the tests that cover it.
+
+**How to read it.** The five counters at the top are the summary: how many risks are **Covered** (green in the Excel export), **Partial** (some testing, not enough), or **Gap** (no test at all — red). The Coverage Score is the overall percentage. In the table, high-severity rows with anything other than "Covered" are the ones to raise in a review.
+
+**What you get.** The single most important management view: proof that no known risk is silently untested. Click **Check Gaps** after editing other tabs to refresh it.
+
+### Tab 7: Gaps — what the app flagged for humans
+
+**What it is.** The app's findings — the list of problems it wants a human to resolve. This is where the tool goes beyond generating paperwork and starts checking it.
+
+**How to read it.** Each row is one finding. *Gap Type* says what kind: a risk with no test, a proposed test awaiting engineer acceptance, a high-severity risk with no supporting source in the knowledge base, a test pointing at a risk that does not exist, or a strong library match the draft never used. *Priority* High + Severity 8+ = deal with it first. *Recommended Fix* proposes a concrete closure (usually a specific test). A gap stays **Open** until an engineer accepts the fix and links evidence — the app never closes its own findings.
+
+**What you get.** An action list. In the demo, enable "Show intentional demo gap" in the sidebar to see a high-severity gap get caught and a closure test proposed — that moment is the pitch.
+
+**Lessons Learned** (bottom of this tab): advice from past programs that matches the current part's risks — e.g. "P1 crossmember cracked at a 3.5 mm radius; keep radii ≥ 4× thickness." This is how the app stops knowledge from leaving with retiring engineers.
+
+### Tab 8: Dashboard — the summary for management
+
+**What it is.** The numbers that summarize everything: how many risks, how many high-severity, highest RPN, estimated risk reduction if actions are taken, test count, coverage scores, open gaps. Below them, the **RAG knowledge layer** row shows how much of the draft is source-backed: documents indexed, rows with source evidence, rows on rule-based fallback, and average AI confidence.
+
+**How to read it.** Three questions answered at a glance: *How risky is this part?* (risk counts, highest RPN). *Is the plan complete?* (coverage scores — high-severity coverage should be 100%). *Can we trust the draft?* (grounded rows vs fallback rows).
+
+### Tab 9: Export — take the results with you
+
+**What it is.** Two downloads: a markdown pilot report (readable summary) and a formatted Excel workbook (the full engineering document).
+
+**What you get.** The workbook has 15 sheets — management summary first, then dashboard, FMEA header, inputs, knowledge-base summary, retrieved sources, P-Diagram, the editable DFMEA/DVP&R/Traceability/Gap/Lessons tables, pilot metrics, settings (how every score is calculated), and a pitch-readiness checklist. It is color-coded (red = gap/high risk, yellow = partial/medium, green = covered/low), has filters and dropdowns, and is designed to be reviewed by people who never open the app.
+
+---
+
+## Reading the Colors (App and Excel)
+
+- **Red** — needs attention: high Action Priority, high residual risk, or an uncovered risk.
+- **Yellow** — in between: medium priority or partial coverage.
+- **Green** — healthy: covered risks, low residual risk.
+- **"No RAG source found - rule-based draft"** — the row is a reasonable engineering default, not backed by a historical document; review it more carefully.
 
 ## Optional: Enable the LLM Enrichment Layer
 
