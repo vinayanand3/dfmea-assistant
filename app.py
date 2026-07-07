@@ -18,7 +18,7 @@ from openpyxl.utils import get_column_letter
 
 
 APP_TITLE = "BIW DFMEA-DVP&R AI Assistant"
-TOOL_VERSION = "MVP-0.4"
+TOOL_VERSION = "MVP-0.5"
 PARTS_DIR = Path(__file__).parent / "examples" / "parts"
 DISCLAIMER = (
     "Draft engineering content for review only. All DFMEA, DVP&R, rating, "
@@ -368,6 +368,224 @@ DEFAULT_PART_LABEL = next(iter(PART_EXAMPLES), "")
 DEMO_INPUTS = PART_EXAMPLES.get(DEFAULT_PART_LABEL, {})
 
 
+# --------------------------------------------------------------------------- RAG
+try:
+    from rag import VectorStore, load_file_to_chunks
+    from rag.retriever import best_match_for_row, citation_label, retrieve_groups
+
+    RAG_IMPORT_ERROR = ""
+except Exception as _rag_exc:  # keeps the app usable if RAG deps are missing
+    RAG_IMPORT_ERROR = str(_rag_exc)
+
+KB_SEED_DIR = Path(__file__).parent / "data" / "knowledge_base"
+KB_UPLOAD_DIR = Path(__file__).parent / "data" / "uploaded_docs"
+VECTOR_DB_PATH = Path(__file__).parent / "data" / "vector_store"
+RAG_DISCLAIMER = (
+    "RAG results are used as engineering reference only. Engineer review and approval "
+    "are required before release."
+)
+RAG_FALLBACK_LABEL = "No RAG source found - rule-based draft"
+RAG_DOC_TYPES = [
+    "Historical DFMEA",
+    "Historical DVP&R",
+    "Lessons Learned",
+    "BIW Design Standard",
+    "Weld Standard",
+    "Corrosion Standard",
+    "CAE Report",
+    "Validation Report",
+    "Launch Issue Report",
+    "Manufacturing Feasibility Report",
+    "Other",
+]
+RAG_SOURCE_STRENGTHS = [
+    "Synthetic Demo",
+    "Historical Program Document",
+    "Engineering Standard",
+    "Validation Report",
+    "CAE Report",
+    "Lessons Learned",
+    "Unknown",
+]
+RETRIEVED_SOURCES_COLUMNS = [
+    "Query ID",
+    "Generation Type",
+    "Source Rank",
+    "Similarity Score",
+    "Document Type",
+    "Source File",
+    "Source Sheet",
+    "Source Row",
+    "Source Chunk ID",
+    "Chunk Preview",
+    "Used In Output",
+]
+_SEED_FILE_TYPES = {
+    "historical_dfmea_biw.xlsx": "Historical DFMEA",
+    "historical_dvpr_biw.xlsx": "Historical DVP&R",
+    "lessons_learned_biw.xlsx": "Lessons Learned",
+    "biw_weld_standard_ws_join_003.md": "Weld Standard",
+    "biw_corrosion_standard_ts_cor_021.md": "Corrosion Standard",
+    "biw_dimensional_standard_dim_build_007.md": "BIW Design Standard",
+    "launch_issue_reports_biw.md": "Launch Issue Report",
+}
+
+
+@st.cache_resource
+def get_rag_store() -> "VectorStore":
+    return VectorStore(VECTOR_DB_PATH)
+
+
+def seed_knowledge_base(store: "VectorStore") -> int:
+    """Index the bundled synthetic corpus. Duplicate chunks are skipped by hash."""
+    added = 0
+    if not KB_SEED_DIR.exists():
+        return added
+    for file in sorted(KB_SEED_DIR.iterdir()):
+        doc_type = _SEED_FILE_TYPES.get(file.name, "Other")
+        chunks = load_file_to_chunks(file, doc_type, "Synthetic Demo")
+        added += store.add_chunks(chunks)
+    return added
+
+
+def _confidence_from_similarity(similarity: float) -> float:
+    return round(min(0.95, 0.5 + similarity / 2), 2)
+
+
+def _ground_frame(
+    df: pd.DataFrame,
+    text_columns: list[str],
+    document_type: str,
+    generation_type: str,
+    store: "VectorStore",
+    retrieved_log: list[dict[str, Any]],
+) -> pd.DataFrame:
+    """Attach best-match citations from the knowledge base to generated rows."""
+    if df.empty:
+        return df
+    df = df.copy()
+    for idx, row in df.iterrows():
+        row_text = " ".join(str(row.get(col, "")) for col in text_columns)
+        match = best_match_for_row(store, row_text, document_type)
+        if match is None:
+            if "Future RAG Citation" in df.columns:
+                df.at[idx, "Future RAG Citation"] = RAG_FALLBACK_LABEL
+            continue
+        meta = match.get("metadata", {})
+        if "Future RAG Citation" in df.columns:
+            df.at[idx, "Future RAG Citation"] = citation_label(match)
+        if "Source Type" in df.columns:
+            df.at[idx, "Source Type"] = "RAG Retrieved (rules draft)"
+        if "Source Strength" in df.columns:
+            df.at[idx, "Source Strength"] = meta.get("source_strength", "Unknown")
+        if "Citation Count" in df.columns:
+            df.at[idx, "Citation Count"] = 1
+        if "AI Confidence Score" in df.columns:
+            df.at[idx, "AI Confidence Score"] = _confidence_from_similarity(match["similarity"])
+        retrieved_log.append(
+            {
+                "Query ID": f"Q-{generation_type[:5].upper()}-{len(retrieved_log) + 1:03d}",
+                "Generation Type": generation_type,
+                "Source Rank": 1,
+                "Similarity Score": match["similarity"],
+                "Document Type": meta.get("document_type", ""),
+                "Source File": meta.get("file_name", ""),
+                "Source Sheet": meta.get("sheet_name", ""),
+                "Source Row": meta.get("row_number", ""),
+                "Source Chunk ID": match.get("chunk_id", ""),
+                "Chunk Preview": str(match.get("chunk_text", ""))[:180],
+                "Used In Output": "Yes",
+            }
+        )
+    return df
+
+
+def ground_with_rag(
+    dfmea_df: pd.DataFrame,
+    dvp_df: pd.DataFrame,
+    lessons_df: pd.DataFrame,
+    inputs: dict[str, str],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Ground generated drafts with knowledge-base citations. Never breaks generation."""
+    empty_log = empty_df(RETRIEVED_SOURCES_COLUMNS)
+    if RAG_IMPORT_ERROR:
+        return dfmea_df, dvp_df, lessons_df, empty_log
+    try:
+        store = get_rag_store()
+        if store.get_collection_stats()["chunks"] == 0:
+            return dfmea_df, dvp_df, lessons_df, empty_log
+        retrieved_log: list[dict[str, Any]] = []
+        dfmea_df = _ground_frame(
+            dfmea_df,
+            ["Potential Failure Mode", "Potential Effect of Failure", "Potential Cause / Mechanism", "Risk Category"],
+            "Historical DFMEA",
+            "DFMEA",
+            store,
+            retrieved_log,
+        )
+        dvp_df = _ground_frame(
+            dvp_df,
+            ["Recommended Validation Test", "Linked Failure Mode", "Test Objective", "Acceptance Criteria"],
+            "Historical DVP&R",
+            "DVP&R",
+            store,
+            retrieved_log,
+        )
+        lessons_df = _ground_frame(
+            lessons_df,
+            ["Related Failure Mode", "Lesson Learned", "Risk Category"],
+            "Lessons Learned",
+            "Lessons",
+            store,
+            retrieved_log,
+        )
+        # log the grouped component-level retrieval (incl. standards) for the export sheet
+        for group, matches in retrieve_groups(store, inputs).items():
+            for rank, match in enumerate(matches, start=1):
+                meta = match.get("metadata", {})
+                retrieved_log.append(
+                    {
+                        "Query ID": f"Q-COMPONENT-{group.upper()}",
+                        "Generation Type": f"Component context ({group})",
+                        "Source Rank": rank,
+                        "Similarity Score": match["similarity"],
+                        "Document Type": meta.get("document_type", ""),
+                        "Source File": meta.get("file_name", ""),
+                        "Source Sheet": meta.get("sheet_name", ""),
+                        "Source Row": meta.get("row_number", ""),
+                        "Source Chunk ID": match.get("chunk_id", ""),
+                        "Chunk Preview": str(match.get("chunk_text", ""))[:180],
+                        "Used In Output": "Reference",
+                    }
+                )
+        retrieved_df = pd.DataFrame(retrieved_log, columns=RETRIEVED_SOURCES_COLUMNS)
+        return dfmea_df, dvp_df, lessons_df, retrieved_df
+    except Exception:
+        return dfmea_df, dvp_df, lessons_df, empty_log
+
+
+def kb_summary_dataframe() -> pd.DataFrame:
+    rows: list[tuple[str, str]] = []
+    if RAG_IMPORT_ERROR:
+        rows.append(("Status", f"RAG layer unavailable: {RAG_IMPORT_ERROR}"))
+    else:
+        try:
+            stats = get_rag_store().get_collection_stats()
+            rows += [
+                ("Indexed Documents", str(stats["documents"])),
+                ("Indexed Chunks", str(stats["chunks"])),
+                ("Document Types", ", ".join(f"{k} ({v})" for k, v in sorted(stats["document_types"].items())) or "None"),
+                ("Source Strength Breakdown", ", ".join(f"{k} ({v})" for k, v in sorted(stats["source_strengths"].items())) or "None"),
+                ("Last Indexed", stats["last_indexed"] or "Never"),
+                ("Vector Database Path", stats["path"]),
+                ("Embedding Model", stats["embedding_model"]),
+            ]
+        except Exception as exc:
+            rows.append(("Status", f"Knowledge base not readable: {exc}"))
+    rows.append(("Disclaimer", RAG_DISCLAIMER))
+    return pd.DataFrame(rows, columns=["Field", "Value"])
+
+
 def init_state() -> None:
     for field in COMPONENT_FIELDS:
         st.session_state.setdefault(field, "")
@@ -380,7 +598,17 @@ def init_state() -> None:
     st.session_state.setdefault("gap_df", empty_df(GAP_COLUMNS))
     st.session_state.setdefault("lessons_df", empty_df(LESSON_COLUMNS))
     st.session_state.setdefault("pdiag_df", empty_df(P_DIAGRAM_COLUMNS))
+    st.session_state.setdefault("retrieved_sources_df", empty_df(RETRIEVED_SOURCES_COLUMNS))
     st.session_state.setdefault("last_generated", False)
+    # Auto-seed the knowledge base so RAG works out of the box (incl. ephemeral HF Spaces).
+    if not RAG_IMPORT_ERROR and not st.session_state.get("kb_seed_attempted"):
+        st.session_state["kb_seed_attempted"] = True
+        try:
+            store = get_rag_store()
+            if store.get_collection_stats()["chunks"] == 0:
+                seed_knowledge_base(store)
+        except Exception:
+            pass
 
 
 def component_inputs() -> dict[str, str]:
@@ -1755,6 +1983,10 @@ def generate_all() -> None:
     trace_df = generate_traceability(dfmea_df, dvp_df)
     gap_df = generate_gap_analysis(trace_df)
     lessons_df = generate_lessons(dfmea_df)
+    dfmea_df, dvp_df, lessons_df, retrieved_df = ground_with_rag(dfmea_df, dvp_df, lessons_df, inputs)
+    trace_df = generate_traceability(dfmea_df, dvp_df)
+    gap_df = generate_gap_analysis(trace_df)
+    st.session_state.retrieved_sources_df = retrieved_df
     st.session_state.pdiag_df = generate_p_diagram(inputs)
     st.session_state.dfmea_df = dfmea_df
     st.session_state.dvp_df = dvp_df
@@ -1947,6 +2179,13 @@ def management_summary_dataframe(
         ("Key Finding", f"{high_priority_gaps} high-priority validation gap or proposed closure item identified."),
         ("Key Finding", f"{len(lessons_df)} lessons learned reused."),
         (
+            "RAG Knowledge Layer",
+            "This prototype includes a local RAG knowledge layer. Engineering documents are parsed, "
+            "chunked, embedded, and searched before recommendations are finalized. Rows with retrieved "
+            "source evidence carry file, sheet, row, chunk ID, source strength, and AI confidence. Rows "
+            "without matching sources are labeled as rule-based fallback and require engineer review.",
+        ),
+        (
             "Gap Closure Workflow",
             GAP_WORKFLOW_NOTE,
         ),
@@ -2084,6 +2323,8 @@ def workbook_tables(
         "Dashboard": dashboard_dataframe(dfmea_df, sorted_dvp_df, trace_df, gap_df, lessons_df),
         "FMEA Header": fmea_header_dataframe(inputs),
         "Component Input": component_input_dataframe(inputs),
+        "Knowledge Base Summary": kb_summary_dataframe(),
+        "Retrieved Sources": st.session_state.get("retrieved_sources_df", empty_df(RETRIEVED_SOURCES_COLUMNS)),
         "P-Diagram": generate_p_diagram(inputs),
         "DFMEA": dfmea_df,
         "DVP&R": sorted_dvp_df,
@@ -2625,9 +2866,9 @@ def render_header() -> None:
     st.markdown(
         f"""
         <div class="biw-hero">
-            <span class="biw-badge">Prototype {TOOL_VERSION} · AIAG-VDA aligned · Engineer approved</span>
+            <span class="biw-badge">Prototype {TOOL_VERSION} · AIAG-VDA aligned · RAG grounded · Engineer approved</span>
             <h1>{APP_TITLE}</h1>
-            <p>Component inputs &rarr; P-Diagram &rarr; draft DFMEA &rarr; recommended DVP&amp;R &rarr; traceability &amp; gap detection &rarr; management-ready export.</p>
+            <p>Component inputs &rarr; knowledge retrieval &rarr; P-Diagram &rarr; draft DFMEA &rarr; recommended DVP&amp;R &rarr; traceability &amp; gap detection &rarr; cited, management-ready export.</p>
             <div class="biw-disclaimer">&#9888;&#65039; {DISCLAIMER}</div>
         </div>
         """,
@@ -2721,6 +2962,87 @@ def render_input() -> None:
     if st.button("Generate Drafts", type="primary"):
         generate_all()
         st.success("P-Diagram, draft DFMEA, DVP&R, traceability, gaps, dashboard, and lessons generated.")
+
+
+def render_knowledge_base() -> None:
+    st.subheader("Knowledge Base (Local RAG)")
+    st.caption(RAG_DISCLAIMER)
+    if RAG_IMPORT_ERROR:
+        st.error(f"RAG layer unavailable: {RAG_IMPORT_ERROR}. Install requirements and restart.")
+        return
+    store = get_rag_store()
+    stats = store.get_collection_stats()
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Documents Indexed", stats["documents"])
+    c2.metric("Knowledge Chunks", stats["chunks"])
+    c3.metric("Document Types", len(stats["document_types"]))
+    c4.metric("Embedding", "Semantic" if "MiniLM" in stats["embedding_model"] else "Fallback")
+    st.caption(f"Embedding model: {stats['embedding_model']} · Store: {stats['path']}")
+
+    col_seed, col_clear = st.columns(2)
+    with col_seed:
+        if st.button("Seed synthetic demo corpus", help="Index the bundled prior-program DFMEA/DVP&R/lessons/standards demo files."):
+            added = seed_knowledge_base(store)
+            st.success(f"Indexed {added} new chunks from the synthetic corpus.")
+            st.rerun()
+    with col_clear:
+        if st.button("Clear knowledge base", help="Delete all indexed chunks and embeddings."):
+            store.delete_collection()
+            st.success("Knowledge base cleared.")
+            st.rerun()
+
+    st.divider()
+    st.markdown("**Upload engineering documents** (synthetic or approved non-confidential files only)")
+    up1, up2 = st.columns(2)
+    with up1:
+        doc_type = st.selectbox("Document type", RAG_DOC_TYPES, key="kb_doc_type")
+    with up2:
+        strength = st.selectbox("Source strength", RAG_SOURCE_STRENGTHS, key="kb_source_strength")
+    uploads = st.file_uploader(
+        "Files (.xlsx, .csv, .md, .txt, .pdf, .docx)",
+        type=["xlsx", "csv", "md", "txt", "pdf", "docx"],
+        accept_multiple_files=True,
+        key="kb_uploads",
+    )
+    if uploads and st.button("Process files", type="primary"):
+        KB_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        total = 0
+        for file in uploads:
+            saved = KB_UPLOAD_DIR / file.name
+            saved.write_bytes(file.getvalue())
+            chunks = load_file_to_chunks(saved, doc_type, strength, file_bytes=file.getvalue())
+            total += store.add_chunks(chunks)
+        st.success(f"Indexed {total} new chunks from {len(uploads)} file(s). Duplicates were skipped.")
+        st.rerun()
+
+    st.divider()
+    st.markdown("**Search preview** — check what the assistant would retrieve")
+    query = st.text_input("Query", key="kb_query", placeholder="e.g. spot weld fatigue on high-strength steel rail flange")
+    if query:
+        results = store.search(query, top_k=5)
+        if results:
+            preview = pd.DataFrame(
+                [
+                    {
+                        "Similarity": r["similarity"],
+                        "Document Type": r["metadata"].get("document_type", ""),
+                        "Source File": r["metadata"].get("file_name", ""),
+                        "Sheet": r["metadata"].get("sheet_name", ""),
+                        "Row": r["metadata"].get("row_number", ""),
+                        "Preview": r["chunk_text"][:160],
+                    }
+                    for r in results
+                ]
+            )
+            st.dataframe(preview, width="stretch", hide_index=True)
+        else:
+            st.info("No results — seed the corpus or upload documents first.")
+
+    if not st.session_state.retrieved_sources_df.empty:
+        st.divider()
+        st.markdown("**Sources retrieved during the last generation**")
+        st.dataframe(st.session_state.retrieved_sources_df, width="stretch", hide_index=True)
 
 
 def render_pdiagram() -> None:
@@ -2855,6 +3177,32 @@ def render_dashboard() -> None:
     metric_cols = st.columns(4)
     for idx, (_, row) in enumerate(kpis.head(8).iterrows()):
         metric_cols[idx % 4].metric(str(row["Metric"]), str(row["Value"]))
+
+    # RAG grounding KPIs
+    if not RAG_IMPORT_ERROR:
+        try:
+            stats = get_rag_store().get_collection_stats()
+            dfmea_df, dvp_df = st.session_state.dfmea_df, st.session_state.dvp_df
+            grounded = safe_count(dfmea_df, "Source Type", "RAG Retrieved (rules draft)") + safe_count(
+                dvp_df, "Source Type", "RAG Retrieved (rules draft)"
+            )
+            total_rows = len(dfmea_df) + len(dvp_df)
+            fallback = total_rows - grounded
+            avg_conf = 0.0
+            if total_rows:
+                avg_conf = (
+                    mean_numeric(dfmea_df, "AI Confidence Score") * len(dfmea_df)
+                    + mean_numeric(dvp_df, "AI Confidence Score") * len(dvp_df)
+                ) / total_rows
+            st.markdown("**RAG knowledge layer**")
+            r1, r2, r3, r4, r5 = st.columns(5)
+            r1.metric("Documents Indexed", stats["documents"])
+            r2.metric("Knowledge Chunks", stats["chunks"])
+            r3.metric("Rows with Source Evidence", grounded)
+            r4.metric("Rule-Based Fallback Rows", fallback)
+            r5.metric("Avg AI Confidence", f"{avg_conf:.2f}")
+        except Exception:
+            pass
     st.dataframe(dashboard.astype(str), width="stretch", hide_index=True)
 
     if not st.session_state.dfmea_df.empty:
@@ -2907,22 +3255,24 @@ def main() -> None:
     init_state()
     render_header()
 
-    tabs = st.tabs(["Input", "P-Diagram", "DFMEA", "DVP&R", "Traceability", "Gaps", "Dashboard", "Export"])
+    tabs = st.tabs(["Input", "Knowledge Base", "P-Diagram", "DFMEA", "DVP&R", "Traceability", "Gaps", "Dashboard", "Export"])
     with tabs[0]:
         render_input()
     with tabs[1]:
-        render_pdiagram()
+        render_knowledge_base()
     with tabs[2]:
-        render_dfmea()
+        render_pdiagram()
     with tabs[3]:
-        render_dvp()
+        render_dfmea()
     with tabs[4]:
-        render_traceability()
+        render_dvp()
     with tabs[5]:
-        render_gaps()
+        render_traceability()
     with tabs[6]:
-        render_dashboard()
+        render_gaps()
     with tabs[7]:
+        render_dashboard()
+    with tabs[8]:
         render_export()
 
 

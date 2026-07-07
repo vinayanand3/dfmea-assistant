@@ -24,6 +24,16 @@ This is a Streamlit MVP for creating first-pass BIW sheet metal DFMEA and DVP&R 
 - Includes source, RAG citation, reviewer, decision, and notes columns so later OpenAI and RAG suggestions can be tracked.
 - Loads example part definitions from separate JSON files under `examples/parts`.
 
+## What's New in MVP-0.5 (Local RAG knowledge layer)
+
+- **Knowledge Base tab** — upload engineering documents (.xlsx, .csv, .md, .txt, .pdf, .docx), assign document type and source strength, and index them into a local vector store. Includes a live search preview.
+- **Retrieval-grounded citations** — generated DFMEA, DVP&R, and lessons rows are matched against the knowledge base; grounded rows carry a real citation (file, sheet, row, chunk ID, similarity) plus source strength and AI confidence. Unmatched rows are labeled "No RAG source found - rule-based draft".
+- **Synthetic demo corpus** — bundled prior-program style DFMEA/DVP&R workbooks, lessons learned, standards excerpts (WS-JOIN-003, TS-COR-021, DIM-BUILD-007), and launch issue reports under `data/knowledge_base/`. Auto-seeded at startup; regenerate with `python scripts/build_synthetic_corpus.py`.
+- **Local embeddings** — sentence-transformers `all-MiniLM-L6-v2` (no API key, fully local), with a deterministic hashed bag-of-words fallback so the app still runs offline before the model downloads.
+- **Vector store** — lightweight numpy + JSON store implementing the roadmap interface (`add_chunks`, `search`, `delete_collection`, `get_collection_stats`); swappable for ChromaDB/pgvector in production. Duplicate chunks are skipped by content hash.
+- **Export + dashboard updates** — new "Knowledge Base Summary" and "Retrieved Sources" workbook sheets, RAG KPIs on the dashboard, and a RAG explanation row in the Management Summary.
+- **No LLM required** — this is retrieval-grounded rules mode per the RAG roadmap Phase 1; an LLM enrichment layer (e.g., Claude) can be added behind the same guardrails later.
+
 ## What's New in MVP-0.4 (AIAG-VDA alignment + modern UI)
 
 - **P-Diagram tab** — generated parameter diagram (ideal function, input signal, control factors, the five standard noise factor categories, and error states) supporting AIAG-VDA Step 3 function analysis. Error states map to DFMEA failure modes.
