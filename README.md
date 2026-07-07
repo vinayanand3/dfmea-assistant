@@ -10,7 +10,7 @@ pinned: false
 
 # BIW DFMEA-DVP&R AI Assistant
 
-This is a Streamlit MVP for creating first-pass BIW sheet metal DFMEA and DVP&R content from component inputs. The current version uses deterministic rules and synthetic engineering logic only. It is intentionally structured so an OpenAI or RAG-backed generation layer can be added later.
+This is a Streamlit MVP for creating first-pass BIW sheet metal DFMEA and DVP&R content from component inputs. Generation is deterministic and rules-based, grounded by a local RAG knowledge layer that cites similar historical engineering records (synthetic demo corpus included). An optional LLM enrichment layer (Anthropic Claude or OpenAI) can be enabled via environment variables — it is off by default, and every output requires engineer review.
 
 ## What It Does
 
@@ -63,23 +63,60 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+Notes for first launch:
+
+- The knowledge base auto-seeds itself from the bundled synthetic corpus — no setup needed.
+- The first run downloads the sentence-transformers embedding model (~90 MB). Until it is available, the app automatically uses an offline fallback embedder, so everything still works.
+- No API key is required. The app is fully local and deterministic by default.
+
+## Configuration (optional)
+
+Copy `.env.example` to `.env` to change defaults. The main settings:
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `VECTOR_DB_PATH` | Where the vector store persists | `./data/vector_store` |
+| `RAG_TOP_K_DFMEA` / `RAG_TOP_K_DVPR` / `RAG_TOP_K_LESSONS` / `RAG_TOP_K_STANDARDS` | Retrieval depth per context group | 5 / 5 / 3 / 3 |
+| `RAG_MIN_SIMILARITY` | Below this, a row is labeled "No RAG source found" | 0.30 |
+| `RAG_FORCE_FALLBACK_EMBEDDER` | Set `1` to skip the ML model (offline/CI) | off |
+| `RAG_LLM_PROVIDER` | `anthropic` or `openai` to enable the LLM layer | empty (disabled) |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | Provider credentials | empty |
+
+## Run the Tests
+
+```bash
+pip install pytest
+pytest tests/ -q
+```
+
+Twelve tests cover document parsing, chunking, metadata, duplicate skipping, retrieval, fallback behavior, prompt building, LLM output validation, and the end-to-end export.
+
 ## Hosting Note
 
 GitHub Pages cannot run this app directly because Streamlit requires a live Python server and GitHub Pages only serves static files. Use GitHub to store the code, then deploy the app with a Streamlit-capable host such as Streamlit Community Cloud, Render, Railway, Hugging Face Spaces, or an internal server.
 
-## Demo Workflow
+## How to Use the App (Tab by Tab)
 
-1. Open the app.
-2. Choose one of the example parts from the sidebar or `Component Input` tab.
-3. Keep `Show intentional demo gap` enabled in the sidebar for a management demo.
-4. Click `Load Selected Part` or `Load Part`.
-5. Click `Generate Drafts`.
-6. Review RPN, Action Priority, residual risk, action owners, and review status in the DFMEA tab.
-7. Review linked Test IDs, validation levels, build phases, execution status, results, and evidence links in the DVP&R tab.
-8. Open `Traceability` and click `Check Gaps`.
-9. Open `Gaps` to review the dedicated gap analysis and linked lessons learned.
-10. Open `Dashboard` to review management KPIs.
-11. Open `Export` and download the markdown report or formatted Excel workbook.
+1. **Input** — pick one of the example parts from the sidebar (or this tab) and click `Load Selected Part`, or type your own component details. The auto-derived FMEA header (AIAG-VDA planning & preparation block) is shown in the expander. Keep `Show intentional demo gap` enabled in the sidebar for a management demo. Click `Generate Drafts`.
+2. **Knowledge Base** — see what the RAG layer knows. The synthetic corpus (prior-program DFMEAs, DVP&Rs, lessons learned, standards) is indexed automatically. Upload your own `.xlsx/.csv/.md/.txt/.pdf/.docx` files with a document type, source strength, component type, and notes, then click `Process files`. Use the search preview to check what would be retrieved. `Clear knowledge base` resets it; `Seed synthetic demo corpus` restores the demo data.
+3. **P-Diagram** — review the generated function analysis: ideal function, input signal, control factors, the five noise factor categories, and error states. Each error state should map to a DFMEA failure mode. Fully editable.
+4. **DFMEA** — review the draft risk table: S/O/D, RPN, AIAG-VDA Action Priority, YC/SC special-characteristic candidates, vehicle-level end effects, and recommended actions. Grounded rows show their source (file, sheet, row, chunk ID, similarity) in the source columns; ungrounded rows are labeled "No RAG source found - rule-based draft". Edit, add, or delete rows — downstream tabs refresh automatically.
+5. **DVP&R** — review recommended validation tests linked to each failure mode, with test stage (DV/PV/Virtual), validation level, build phase, sample size, acceptance criteria, and standard references. Editable like the DFMEA.
+6. **Traceability** — every failure mode mapped to its validation tests with a coverage status (Covered / Partial / Proposed / Gap) and coverage score. Click `Check Gaps` after manual edits.
+7. **Gaps** — the gap list with AI-proposed closure tests and engineer decision fields. Includes source-aware gap types such as high-severity risks without source evidence and strong knowledge-base matches not used by the draft.
+8. **Dashboard** — management KPIs (risk counts, RPN reduction, coverage scores) plus RAG KPIs (documents indexed, grounded rows, fallback rows, average AI confidence).
+9. **Export** — download the markdown pilot report or the formatted 15-sheet Excel workbook.
+
+## Optional: Enable the LLM Enrichment Layer
+
+Off by default — the app never calls an external API unless you configure it.
+
+1. Copy `.env.example` to `.env`.
+2. Set `RAG_LLM_PROVIDER=anthropic` and `ANTHROPIC_API_KEY=...` (or `openai` + `OPENAI_API_KEY`).
+3. Install the provider package: `pip install anthropic` (or `pip install openai`).
+4. Restart the app and enable the sidebar checkbox `Enable LLM enrichment (optional)`.
+
+On the next `Generate Drafts`, retrieved context is sent to the LLM, which may suggest additional failure modes and validation tests. Suggestions are schema-validated, may only cite real retrieved chunk IDs, and are appended as `LLM + RAG` rows with `Review Status = Under Review` — the engineer accepts, edits, or rejects each one.
 
 ## Included Example Parts
 
@@ -119,16 +156,20 @@ The sidebar option `Show intentional demo gap` creates a management-friendly bef
 
 The Excel workbook includes:
 
-- `Management Summary`: executive-friendly proof-of-concept summary, demo story, prototype boundary, Action Priority disclaimer, and engineer approval boundary.
-- `Dashboard`: management-facing KPIs, coverage scores, explanatory footnotes, and renamed chart legends.
+- `Management Summary`: executive-friendly proof-of-concept summary, demo story, RAG knowledge-layer explanation, prototype boundary, Action Priority disclaimer, and engineer approval boundary.
+- `Dashboard`: management-facing KPIs, RAG KPIs, coverage scores, explanatory footnotes, and renamed chart legends.
+- `FMEA Header`: AIAG-VDA planning & preparation identification block.
 - `Component Input`: original engineer input, program phase, engineer name, generated date, and tool version.
-- `DFMEA`: editable draft risk table with review status fields.
-- `DVP&R`: validation recommendations with sorted Test IDs, execution fields, status, results, and evidence links.
+- `Knowledge Base Summary`: indexed document/chunk counts, document types, source strength breakdown, embedding model, and store path.
+- `Retrieved Sources`: every source retrieved during generation with similarity score, file/sheet/row, chunk ID, preview, and whether it was used in the output.
+- `P-Diagram`: the generated function analysis.
+- `DFMEA`: editable draft risk table with source evidence and review status fields.
+- `DVP&R`: validation recommendations with sorted Test IDs, test stages, execution fields, status, results, evidence links, and source fields.
 - `Traceability`: requirement, function, failure mode, and test linkage with coverage score.
-- `Gap Analysis`: focused list of missing or partial validation coverage with explicit gap status, AI-recommended closure test, engineer decision, approval status, evidence link, and final closure status.
-- `Lessons Learned`: synthetic lessons learned with future RAG citation placeholders.
+- `Gap Analysis`: missing or partial validation coverage plus source-aware gap types, each with gap status, AI-recommended closure test, engineer decision, approval status, evidence link, and final closure status.
+- `Lessons Learned`: lessons matched to the generated risks, with source citations where grounded.
 - `Pilot Metrics`: pilot time-savings and suggestion-quality metrics.
-- `Settings`: rating scales, RPN logic, Action Priority logic, coverage scoring, gap status definitions, disclaimers, and dropdown values.
+- `Settings`: rating scales, RPN and AIAG-VDA AP logic, special characteristic logic, coverage scoring, gap status definitions, disclaimers, and dropdown values.
 - `Pitch Readiness Checklist`: final review checklist before a management presentation.
 
 ## Important Limitations
@@ -138,24 +179,21 @@ The Excel workbook includes:
 - Severity, occurrence, detection, validation coverage, and release decisions must be reviewed and approved by responsible engineering teams.
 - The rule library is intentionally small and should not be treated as complete DFMEA coverage.
 
-## Future Intelligence Layer
-
-The app is designed to add AI later through a generation provider boundary:
+## Architecture
 
 ```text
 Component inputs
-  -> rules-based draft
-  -> optional OpenAI enrichment
-  -> schema validation
-  -> editable tables
-  -> traceability and export
+  -> local RAG retrieval (knowledge base of DFMEAs, DVP&Rs, lessons, standards)
+  -> rules-based draft with source citations
+  -> optional LLM enrichment (Claude or OpenAI, schema-validated, off by default)
+  -> editable tables with engineer review fields
+  -> traceability, source-aware gap analysis, and cited export
 ```
 
-Recommended next steps:
+Remaining production roadmap:
 
-- Add OpenAI structured JSON generation for DFMEA and DVP&R enrichment.
-- Add a secure RAG layer over approved internal lessons learned, historical DFMEAs, DVP&Rs, test procedures, and validation reports.
-- Require source citations for RAG-backed recommendations.
-- Track accepted, edited, and rejected suggestions.
-- Add company-standard Excel templates.
-- Add authentication, audit trail, and approval workflow for a production version.
+- Secure internal deployment over approved company documents (replacing the synthetic corpus).
+- Swap the local vector store for ChromaDB or pgvector at scale.
+- Company-standard Excel templates.
+- Authentication, audit trail, and formal approval workflow.
+- MCP connectors for SharePoint, PLM, and issue tracking (after RAG proves value).
