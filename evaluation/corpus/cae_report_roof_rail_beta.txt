@@ -1,0 +1,11 @@
+Synthetic CAE Report: Beta Roof Rail Reinforcement
+
+Component: Beta Roof Rail Reinforcement
+Risk category: Crash / Safety
+Finding: Roof crush margin was below target after a late gauge reduction from 1.4 mm to 1.1 mm.
+Recommendation: Restore local 1.4 mm gauge near the B-pillar roof rail node or add a tailor-rolled blank transition.
+Validation: Roof crush CAE gateway and physical roof crush quasi-static test.
+Acceptance criteria: Strength-to-weight ratio meets internal target with 10 percent analytical margin.
+Unique marker: ROOF-RAIL-GAUGE-1P4MM
+
+Do not use this roof rail report as evidence for front rail weld pitch or front rail corrosion questions.

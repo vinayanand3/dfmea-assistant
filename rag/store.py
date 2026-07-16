@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from .embeddings import get_embedder
+from .embeddings import get_embedder, get_embedder_status
 
 
 def chunk_hash(file_name: str, sheet_name: str, row_number: Any, chunk_text: str) -> str:
@@ -176,6 +176,7 @@ class VectorStore:
             if str(chunk.get("metadata", {}).get("embedding_model", "")).strip()
         }
         embedding_model = ", ".join(sorted(stored_models)) if stored_models else get_embedder().name
+        active_status = get_embedder_status()
         return {
             "documents": len(files - {""}),
             "chunks": len(self._chunks),
@@ -183,6 +184,9 @@ class VectorStore:
             "source_strengths": strengths,
             "last_indexed": latest,
             "embedding_model": embedding_model,
+            "active_embedding_model": active_status["name"],
+            "semantic_embeddings": active_status["is_semantic"],
+            "embedding_fallback_reason": active_status["fallback_reason"],
             "path": str(self.path),
         }
 

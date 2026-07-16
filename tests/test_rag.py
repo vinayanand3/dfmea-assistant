@@ -26,7 +26,7 @@ from rag.retriever import MIN_SIMILARITY, ranked_search
 from rag.store import VectorStore, chunk_hash
 
 KB_DIR = REPO / "data" / "knowledge_base"
-RAG_EVAL_DIR = REPO.parent / "rag_test_upload_docs"
+RAG_EVAL_DIR = REPO / "evaluation" / "corpus"
 
 
 @pytest.fixture()
@@ -365,6 +365,11 @@ def test_app_generation_has_source_fields_and_gap_analysis(tmp_path):
     gaps = app.generate_gap_analysis(trace)
     gaps = app.augment_gap_analysis(gaps, g_dfmea, g_dvp, retrieved)
     assert "Gap Type" in gaps.columns
+    unused_source_gaps = gaps[gaps["Gap Type"] == "RAG source found but not used"]
+    if not unused_source_gaps.empty:
+        assert unused_source_gaps["Failure Mode"].str.startswith("Unused source: ").all()
+        report = app.build_report(inputs, g_dfmea, g_dvp, trace, gaps, g_lessons)
+        assert "Unused source:" in report
 
     tables = app.workbook_tables(inputs, g_dfmea, g_dvp, trace, gaps, g_lessons)
     assert "Knowledge Base Summary" in tables and "Retrieved Sources" in tables

@@ -1,0 +1,27 @@
+{
+  "benchmark": "Synthetic BIW RAG retrieval benchmark",
+  "benchmark_version": "1.0.0",
+  "mode_requested": "semantic",
+  "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+  "semantic_embeddings": true,
+  "questions": 30,
+  "documents": 6,
+  "corpus_chunks": 13,
+  "recall_at_1": 0.9333,
+  "recall_at_3": 1.0,
+  "recall_at_5": 1.0,
+  "mrr": 0.9667,
+  "citation_exact_at_1": 0.9333,
+  "distractor_rejection_at_5": 1.0,
+  "average_latency_ms": 7.526,
+  "p95_latency_ms": 8.188,
+  "indexing_ms": 229.207,
+  "question_distribution": {
+    "historical_dfmea_front_rail_alpha.csv": 7,
+    "historical_dvpr_front_rail_alpha.csv": 6,
+    "lessons_learned_front_rail_and_underbody.md": 5,
+    "weld_standard_ws_join_017.md": 4,
+    "corrosion_standard_ec_biw_041.md": 4,
+    "cae_report_roof_rail_beta.txt": 4
+  }
+}

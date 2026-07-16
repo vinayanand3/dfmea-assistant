@@ -9,6 +9,7 @@ skipped gracefully if the library is not installed.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Any
 
 import pandas as pd
@@ -56,6 +57,34 @@ def _row_meta_value(row: pd.Series, *names: str) -> str:
     return ""
 
 
+def _text_metadata(text: str) -> dict[str, str]:
+    """Extract common engineering labels from free-text documents.
+
+    Text chunks previously discarded explicit labels such as ``Component:``.
+    Preserving them lets the retriever identify cross-component conflicts using
+    metadata instead of relying only on token similarity.
+    """
+    aliases = {
+        "component_name": ("component", "component name", "item"),
+        "failure_mode_id": ("failure mode id", "linked failure mode id"),
+        "failure_mode": ("failure mode", "potential failure mode", "linked failure mode"),
+        "test_id": ("test id",),
+        "requirement_id": ("requirement id",),
+        "risk_category": ("risk category",),
+    }
+    found: dict[str, str] = {key: "" for key in aliases}
+    for key, labels in aliases.items():
+        for label in labels:
+            match = re.search(
+                rf"(?im)^\s*(?:[-*]\s*)?{re.escape(label)}\s*:\s*(.+?)\s*$",
+                text,
+            )
+            if match:
+                found[key] = match.group(1).strip()
+                break
+    return found
+
+
 def chunk_dataframe_rows(
     df: pd.DataFrame,
     file_name: str,
@@ -97,6 +126,7 @@ def chunk_text_document(
     source_strength: str,
 ) -> list[dict[str, Any]]:
     words = text.split()
+    document_metadata = _text_metadata(text)
     chunks: list[dict[str, Any]] = []
     start, index = 0, 1
     while start < len(words):
@@ -114,12 +144,7 @@ def chunk_text_document(
                         "row_number": index,
                         "document_type": document_type,
                         "source_strength": source_strength,
-                        "component_name": "",
-                        "failure_mode_id": "",
-                        "failure_mode": "",
-                        "test_id": "",
-                        "requirement_id": "",
-                        "risk_category": "",
+                        **document_metadata,
                     },
                 }
             )

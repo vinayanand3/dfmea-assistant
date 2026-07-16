@@ -933,6 +933,7 @@ def augment_gap_analysis(
                     "RAG source found but not used",
                     f"Strong knowledge-base match ({src['Source File']} row {src['Source Row']}, similarity {src['Similarity Score']}) was retrieved but no generated row cites it.",
                     "Review this source for a failure mode or validation item the draft may be missing.",
+                    failure_mode=f"Unused source: {src['Source File']}",
                     priority="Medium",
                 )
 
@@ -3632,8 +3633,16 @@ def render_knowledge_base() -> None:
     c1.metric("Documents Indexed", stats["documents"])
     c2.metric("Knowledge Chunks", stats["chunks"])
     c3.metric("Document Types", len(stats["document_types"]))
-    c4.metric("Embedding", "Semantic" if "MiniLM" in stats["embedding_model"] else "Fallback")
-    st.caption(f"Embedding model: {stats['embedding_model']} · Store: {stats['path']}")
+    c4.metric("Embedding", "Semantic" if stats["semantic_embeddings"] else "Fallback")
+    st.caption(
+        f"Active embedding model: {stats['active_embedding_model']} · "
+        f"Indexed vectors: {stats['embedding_model']} · Store: {stats['path']}"
+    )
+    if not stats["semantic_embeddings"]:
+        st.warning(
+            "Lexical fallback embeddings are active. Results use token overlap rather than semantic similarity. "
+            f"Reason: {stats['embedding_fallback_reason'] or 'semantic model unavailable'}."
+        )
     if action_message := st.session_state.pop("kb_action_message", ""):
         st.success(action_message)
 

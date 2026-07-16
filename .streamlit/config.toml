@@ -7,3 +7,8 @@ font = "sans serif"
 
 [browser]
 gatherUsageStats = false
+
+[server]
+# Avoid noisy introspection of optional Transformers image modules in hosted
+# deployments. Developers can override this with --server.fileWatcherType auto.
+fileWatcherType = "none"

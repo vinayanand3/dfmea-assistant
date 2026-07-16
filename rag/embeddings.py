@@ -16,6 +16,7 @@ _MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 _FALLBACK_DIM = 512
 
 _embedder_singleton = None
+_embedder_error = ""
 
 
 class HashedBowEmbedder:
@@ -57,16 +58,29 @@ class SentenceTransformerEmbedder:
 
 def get_embedder():
     """Return the best available embedder, caching the instance."""
-    global _embedder_singleton
+    global _embedder_singleton, _embedder_error
     if _embedder_singleton is not None:
         return _embedder_singleton
     from . import config
 
     if config.RAG_FORCE_FALLBACK_EMBEDDER:
         _embedder_singleton = HashedBowEmbedder()
+        _embedder_error = "Fallback explicitly enabled by RAG_FORCE_FALLBACK_EMBEDDER"
         return _embedder_singleton
     try:
         _embedder_singleton = SentenceTransformerEmbedder()
-    except Exception:
+        _embedder_error = ""
+    except Exception as exc:
         _embedder_singleton = HashedBowEmbedder()
+        _embedder_error = f"{type(exc).__name__}: {exc}"
     return _embedder_singleton
+
+
+def get_embedder_status() -> dict[str, object]:
+    """Return explicit runtime diagnostics for UI, exports, and evaluation."""
+    embedder = get_embedder()
+    return {
+        "name": embedder.name,
+        "is_semantic": bool(getattr(embedder, "is_semantic", False)),
+        "fallback_reason": _embedder_error if not getattr(embedder, "is_semantic", False) else "",
+    }

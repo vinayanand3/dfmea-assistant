@@ -5,13 +5,14 @@ and this package retrieves similar historical engineering records so each genera
 row can carry a real, auditable source citation. No external APIs are required.
 """
 
-from .embeddings import get_embedder
+from .embeddings import get_embedder, get_embedder_status
 from .store import VectorStore, chunk_hash
 from .loader import load_file_to_chunks, chunk_dataframe_rows, chunk_text_document
 from .retriever import build_component_query, retrieve_groups
 
 __all__ = [
     "get_embedder",
+    "get_embedder_status",
     "VectorStore",
     "chunk_hash",
     "load_file_to_chunks",
