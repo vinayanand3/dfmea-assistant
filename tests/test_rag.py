@@ -277,7 +277,46 @@ def test_app_generation_has_source_fields_and_gap_analysis(tmp_path):
     dvp = app.generate_dvp(dfmea, {"demo_gap_mode": True})
     lessons = app.generate_lessons(dfmea)
 
-    for col in ("Source Evidence", "Source File", "Source Sheet", "Source Row", "Source Chunk ID", "AI Confidence", "Review Status"):
+    assert dfmea.columns.is_unique
+    assert dvp.columns.is_unique
+    assert app.TRACE_COLUMNS == list(dict.fromkeys(app.TRACE_COLUMNS))
+    assert dfmea["Function"].nunique() > 1
+    assert dfmea["Function"].fillna("").str.strip().ne("").all()
+    assert dfmea["Requirement"].fillna("").str.strip().ne("").all()
+    assert dfmea["Requirement Target"].str.startswith("TBD").all()
+    assert dfmea["Requirement Source"].str.startswith("TBD").all()
+    assert dfmea.groupby("Function ID")["Function"].nunique().max() == 1
+    assert dfmea.groupby("Requirement ID")["Requirement"].nunique().max() == 1
+    assert (dfmea["Revised RPN"] == dfmea["RPN"]).all()
+    assert (dfmea["RPN Reduction %"] == 0).all()
+    assert dfmea["Closure Evidence"].fillna("").eq("").all()
+    assert dfmea["Action Owner"].fillna("").eq("").all()
+    assert dfmea["Projected Residual Risk Level"].fillna("").eq("").all()
+    assert dfmea["Final Approved Text"].fillna("").eq("").all()
+    readable_ap = dfmea["AP (AIAG-VDA)"].map({"H": "High", "M": "Medium", "L": "Low"})
+    assert readable_ap.equals(dfmea["Action Priority"])
+
+    dfmea_by_id = dfmea.set_index("Failure Mode ID")
+    for _, test_row in dvp.iterrows():
+        linked = dfmea_by_id.loc[test_row["Linked Failure Mode ID"]]
+        assert test_row["Function ID"] == linked["Function ID"]
+        assert test_row["Function"] == linked["Function"]
+        assert test_row["Requirement ID"] == linked["Requirement ID"]
+        assert test_row["Requirement"] == linked["Requirement"]
+        assert test_row["Requirement Target"] == linked["Requirement Target"]
+        assert test_row["Requirement Source"] == linked["Requirement Source"]
+
+    assert dvp["Item"].fillna("").str.strip().ne("").all()
+    assert dvp["Acceptance Criteria Status"].eq("Target Required").all()
+    assert dvp["Planned Start Date"].fillna("").eq("").all()
+    assert dvp["Planned Completion Date"].fillna("").eq("").all()
+    assert dvp["Pass / Fail"].eq("Not Run").all()
+    assert dvp["Evidence Link"].fillna("").eq("").all()
+    assert dvp["Test Owner"].fillna("").eq("").all()
+    expected_suggestion_ids = dvp["Test ID"].str.replace("TEST-", "AI-DVPR-", regex=False)
+    assert dvp["AI Suggestion ID"].equals(expected_suggestion_ids)
+
+    for col in ("Source Evidence", "Source File", "Source Sheet", "Source Row", "Source Chunk ID", "AI Confidence Score", "Source Match Type", "Review Status"):
         assert col in dfmea.columns, f"DFMEA missing {col}"
         assert col in dvp.columns, f"DVP&R missing {col}"
         assert col in lessons.columns, f"Lessons missing {col}"
@@ -292,11 +331,14 @@ def test_app_generation_has_source_fields_and_gap_analysis(tmp_path):
     grounded_rows = grounded_rows[grounded_rows["Source Chunk ID"].fillna("").astype(str).ne("")]
     assert not grounded_rows.empty
     assert grounded_rows["Source Row"].map(lambda value: isinstance(value, str)).all()
-    assert grounded_rows["AI Confidence"].notna().all()
+    assert grounded_rows["AI Confidence Score"].notna().all()
+    assert ~grounded_rows["Reason for Human Review"].str.contains("unavailable without retrieved evidence", na=False).any()
+    assert grounded_rows["Change Log"].str.contains("RAG source attached", na=False).all()
 
     fallback_rows = g_dfmea[g_dfmea["Source Chunk ID"].fillna("").astype(str).eq("")]
     if not fallback_rows.empty:
-        assert fallback_rows["AI Confidence"].isna().all()
+        assert fallback_rows["AI Confidence Score"].isna().all()
+        assert fallback_rows["Source Match Type"].eq("No retrieved source").all()
 
     edited = g_dfmea.head(1).copy()
     edited.loc[:, ["Initial Severity", "Initial Occurrence", "Initial Detection"]] = [9, 4, 5]
@@ -306,12 +348,20 @@ def test_app_generation_has_source_fields_and_gap_analysis(tmp_path):
     assert recalculated.iloc[0]["Initial RPN"] == 180
     assert recalculated.iloc[0]["RPN"] == 160
     assert recalculated.iloc[0]["Revised RPN"] == 48
-    assert recalculated.iloc[0]["RPN Reduction %"] == pytest.approx(0.733)
+    assert recalculated.iloc[0]["RPN Reduction %"] == pytest.approx(0.7)
     assert recalculated.iloc[0]["Action Priority"] == "High"
     assert recalculated.iloc[0]["AP (AIAG-VDA)"] == "H"
-    assert recalculated.iloc[0]["Residual Risk Level"] == "Low"
+    assert recalculated.iloc[0]["Current Risk Level"] == "High"
+    assert recalculated.iloc[0]["Projected Residual Risk Level"] == "Low"
 
     trace = app.generate_traceability(g_dfmea, g_dvp)
+    assert trace.columns.is_unique
+    assert trace["Function"].fillna("").str.strip().ne("").all()
+    assert trace["Requirement"].fillna("").str.strip().ne("").all()
+    assert trace["Requirement Target"].str.startswith("TBD").all()
+    assert trace["Requirement Source"].str.startswith("TBD").all()
+    assert trace["Coverage Status"].isin(["Partial", "Proposed Coverage"]).all()
+    assert trace["Coverage Status"].value_counts().sum() == len(dfmea)
     gaps = app.generate_gap_analysis(trace)
     gaps = app.augment_gap_analysis(gaps, g_dfmea, g_dvp, retrieved)
     assert "Gap Type" in gaps.columns

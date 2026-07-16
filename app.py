@@ -99,6 +99,9 @@ DFMEA_COLUMNS = [
     "Failure Mode ID",
     "Function ID",
     "Requirement ID",
+    "Requirement",
+    "Requirement Target",
+    "Requirement Source",
     "Action ID",
     "Item",
     "Function",
@@ -126,7 +129,8 @@ DFMEA_COLUMNS = [
     "Revised Detection",
     "Revised RPN",
     "RPN Reduction %",
-    "Residual Risk Level",
+    "Current Risk Level",
+    "Projected Residual Risk Level",
     "Action Owner",
     "Responsible Team",
     "Target Completion Date",
@@ -147,7 +151,8 @@ DFMEA_COLUMNS = [
     "Source Sheet",
     "Source Row",
     "Source Chunk ID",
-    "AI Confidence",
+    "Source Component",
+    "Source Match Type",
     "Review Status",
     "Engineer Decision",
     "Rejection Reason",
@@ -161,7 +166,13 @@ DFMEA_COLUMNS = [
 
 DVP_COLUMNS = [
     "Test ID",
+    "Item",
+    "Function ID",
+    "Function",
     "Requirement ID",
+    "Requirement",
+    "Requirement Target",
+    "Requirement Source",
     "Linked Failure Mode ID",
     "Linked Failure Mode",
     "Recommended Validation Test",
@@ -176,6 +187,7 @@ DVP_COLUMNS = [
     "Test Duration / Cycles",
     "Test Conditions",
     "Acceptance Criteria",
+    "Acceptance Criteria Status",
     "Planned Start Date",
     "Planned Completion Date",
     "Actual Completion Date",
@@ -200,7 +212,8 @@ DVP_COLUMNS = [
     "Source Sheet",
     "Source Row",
     "Source Chunk ID",
-    "AI Confidence",
+    "Source Component",
+    "Source Match Type",
     "Review Status",
     "Engineer Decision",
     "Rejection Reason",
@@ -214,7 +227,11 @@ DVP_COLUMNS = [
 
 TRACE_COLUMNS = [
     "Requirement ID",
+    "Requirement",
+    "Requirement Target",
+    "Requirement Source",
     "Function ID",
+    "Function",
     "Failure Mode ID",
     "Failure Mode",
     "Risk Category",
@@ -313,7 +330,8 @@ LESSON_COLUMNS = [
     "Source Sheet",
     "Source Row",
     "Source Chunk ID",
-    "AI Confidence",
+    "Source Component",
+    "Source Match Type",
     "Review Status",
     "Rejection Reason",
     "Final Approved Text",
@@ -329,7 +347,7 @@ P_DIAGRAM_COLUMNS = ["Element", "Category", "Description"]
 ACTION_STATUS_VALUES = ["Open", "In Progress", "Complete", "Rejected", "Deferred"]
 VALIDATION_LEVEL_VALUES = ["CAE", "Coupon", "Component", "Subsystem", "Vehicle", "Subsystem / Vehicle"]
 BUILD_PHASE_VALUES = ["Concept", "Mule", "Alpha", "Beta", "Production Intent", "Launch"]
-PASS_FAIL_VALUES = ["TBD", "Not Run", "Pass", "Fail", "Waived"]
+PASS_FAIL_VALUES = ["Not Run", "Pass", "Fail", "Waived"]
 VALIDATION_STATUS_VALUES = ["Planned", "Proposed", "In Progress", "Passed", "Failed", "Waived", "Blocked"]
 GAP_STATUS_VALUES = ["Open", "Proposed", "Accepted", "In Progress", "Closed", "Waived"]
 ENGINEER_DECISION_VALUES = ["Accept", "Modify", "Reject", "Pending", "Needs More Data"]
@@ -486,6 +504,54 @@ def _confidence_from_similarity(similarity: float) -> float:
     return round(min(0.95, 0.5 + similarity / 2), 2)
 
 
+def _append_change_log(existing: Any, event: str) -> str:
+    entries = [part.strip() for part in str(existing or "").split(" | ") if part.strip()]
+    if event not in entries:
+        entries.append(event)
+    return " | ".join(entries)
+
+
+def _component_family(value: Any) -> str:
+    text = str(value or "").lower().replace("_", " ").replace("-", " ")
+    families = (
+        "front rail", "rear rail", "roof rail", "rear floor", "front floor",
+        "shock tower", "b pillar", "a pillar", "c pillar", "rocker",
+        "underbody", "crossmember", "wheelhouse",
+    )
+    normalized = " ".join(text.split())
+    for family in families:
+        if family in normalized:
+            return family
+    return normalized
+
+
+def _source_match_type(item: Any, source_component: Any) -> str:
+    item_family = _component_family(item)
+    source_family = _component_family(source_component)
+    if not item_family:
+        return "Current component unspecified"
+    if not source_family:
+        return "Source component unspecified"
+    if item_family and item_family == source_family:
+        return "Same component family"
+    return "Cross-component analog"
+
+
+def _grounded_review_reason(existing: Any, confidence: float, source_match_type: str) -> str:
+    stale = {
+        "AI Confidence Score unavailable without retrieved evidence",
+        "Source Type = Rules-based draft",
+        "Source Type = Synthetic MVP Rule",
+    }
+    reasons = [part.strip() for part in str(existing or "").split(";") if part.strip() and part.strip() not in stale]
+    reasons = [reason for reason in reasons if not reason.startswith("AI Confidence Score <")]
+    if confidence < 0.75:
+        reasons.append("AI Confidence Score < 0.75")
+    if source_match_type == "Cross-component analog":
+        reasons.append("Retrieved source is a cross-component analog")
+    return "; ".join(dict.fromkeys(reasons)) if reasons else "Standard engineer review"
+
+
 def _mark_frame_as_rag_fallback(df: pd.DataFrame) -> pd.DataFrame:
     """Label rows as ungrounded without assigning artificial RAG confidence."""
     df = df.copy()
@@ -499,9 +565,16 @@ def _mark_frame_as_rag_fallback(df: pd.DataFrame) -> pd.DataFrame:
         df["Source Type"] = "Rules-based draft"
     if "Citation Count" in df.columns:
         df["Citation Count"] = 0
-    for column in ("AI Confidence", "AI Confidence Score"):
-        if column in df.columns:
-            df[column] = float("nan")
+    if "AI Confidence Score" in df.columns:
+        df["AI Confidence Score"] = float("nan")
+    if "Source Component" in df.columns:
+        df["Source Component"] = ""
+    if "Source Match Type" in df.columns:
+        df["Source Match Type"] = "No retrieved source"
+    if "Change Log" in df.columns:
+        df["Change Log"] = df["Change Log"].map(
+            lambda value: _append_change_log(value, "No relevant RAG source found; rules-based fallback retained.")
+        )
     return df
 
 
@@ -527,6 +600,8 @@ def _ground_frame(
             continue
         meta = match.get("metadata", {})
         confidence = _confidence_from_similarity(match["similarity"])
+        source_component = meta.get("component_name", "")
+        source_match_type = _source_match_type(row.get("Item", ""), source_component)
         if "Future RAG Citation" in df.columns:
             df.at[idx, "Future RAG Citation"] = citation_label(match)
         if "Source Type" in df.columns:
@@ -550,10 +625,20 @@ def _ground_frame(
             df.at[idx, "Source Row"] = str(meta.get("row_number", "") or "")
         if "Source Chunk ID" in df.columns:
             df.at[idx, "Source Chunk ID"] = match.get("chunk_id", "")
-        if "AI Confidence" in df.columns:
-            df.at[idx, "AI Confidence"] = confidence
+        if "Source Component" in df.columns:
+            df.at[idx, "Source Component"] = source_component
+        if "Source Match Type" in df.columns:
+            df.at[idx, "Source Match Type"] = source_match_type
         if "Review Status" in df.columns:
             df.at[idx, "Review Status"] = "Draft - source grounded"
+        if "Reason for Human Review" in df.columns:
+            reason = _grounded_review_reason(row.get("Reason for Human Review", ""), confidence, source_match_type)
+            df.at[idx, "Reason for Human Review"] = reason
+            if "Human Review Required" in df.columns:
+                df.at[idx, "Human Review Required"] = review_required(reason)
+        if "Change Log" in df.columns:
+            event = f"RAG source attached: {citation_label(match)}"
+            df.at[idx, "Change Log"] = _append_change_log(row.get("Change Log", ""), event)
         retrieved_log.append(
             {
                 "Query ID": f"Q-{generation_type[:5].upper()}-{len(retrieved_log) + 1:03d}",
@@ -679,8 +764,9 @@ def apply_llm_enrichment(
         if not chunk_ids:
             return {
                 "Source Evidence": "LLM suggestion without retrieved source - requires engineer verification",
-                "AI Confidence": 0.5,
                 "AI Confidence Score": 0.5,
+                "Source Component": "",
+                "Source Match Type": "No retrieved source",
             }
         match = known_chunks[chunk_ids[0]]
         meta = match.get("metadata", {})
@@ -694,8 +780,9 @@ def apply_llm_enrichment(
             "Source Strength": meta.get("source_strength", "Unknown"),
             "Citation Count": len(chunk_ids),
             "Future RAG Citation": citation_label(match),
-            "AI Confidence": conf,
             "AI Confidence Score": conf,
+            "Source Component": meta.get("component_name", ""),
+            "Source Match Type": "Source match requires review",
         }
 
     new_dfmea_rows = []
@@ -932,18 +1019,6 @@ def rpn(severity: int, occurrence: int, detection: int) -> int:
     return int(severity) * int(occurrence) * int(detection)
 
 
-def action_priority(severity: int, occurrence: int, rpn_value: int) -> str:
-    if severity >= 9:
-        return "High"
-    if severity >= 8 and occurrence >= 4:
-        return "High"
-    if severity >= 7 and rpn_value >= 120:
-        return "High"
-    if rpn_value >= 80:
-        return "Medium"
-    return "Low"
-
-
 def aiag_vda_action_priority(severity: int, occurrence: int, detection: int) -> str:
     """Condensed implementation of the AIAG-VDA 2019 Action Priority (AP) logic.
 
@@ -972,6 +1047,17 @@ def aiag_vda_action_priority(severity: int, occurrence: int, detection: int) -> 
             return "M"
         return "L"
     return "L"
+
+
+def action_priority(severity: int, occurrence: int, detection: int) -> str:
+    """Return the readable label for the same AIAG-VDA AP calculation.
+
+    Keeping this column aligned with ``AP (AIAG-VDA)`` prevents conflicting
+    priorities caused by a second RPN-threshold scheme.
+    """
+    return {"H": "High", "M": "Medium", "L": "Low"}[
+        aiag_vda_action_priority(severity, occurrence, detection)
+    ]
 
 
 def special_characteristic(severity: int, occurrence: int) -> str:
@@ -1042,7 +1128,7 @@ def function_id_for_category(category: str) -> str:
     mapping = {
         "Crash / Safety": "F-001",
         "Durability": "F-002",
-        "Joining / Durability": "F-002",
+        "Joining / Durability": "F-011",
         "Dimensional": "F-003",
         "Corrosion": "F-004",
         "Stamping / Formability": "F-005",
@@ -1054,12 +1140,29 @@ def function_id_for_category(category: str) -> str:
     return mapping.get(category, "F-010")
 
 
+def function_for_category(category: str, inputs: dict[str, str]) -> str:
+    """Return the category-specific function represented by the stable Function ID."""
+    mapping = {
+        "Crash / Safety": "Manage crash loads through the intended load path with controlled structural deformation",
+        "Durability": "Maintain structural integrity and load transfer over the specified vehicle service life",
+        "Joining / Durability": "Transfer cyclic structural loads through welded joints without fatigue separation",
+        "Dimensional": "Maintain component datums and interfaces within approved body-build tolerances",
+        "Corrosion": "Protect surfaces, flanges, and closed sections against corrosion over vehicle life",
+        "Stamping / Formability": "Enable repeatable forming of the component without splits, excessive thinning, or wrinkles",
+        "Manufacturing Quality": "Provide production-feasible joints with consistent required weld quality",
+        "NVH": "Provide local stiffness and joint integrity needed to control vibration and structure-borne noise",
+        "Attachment / Durability": "Retain attached brackets and fasteners while distributing interface loads without pull-out",
+        "Serviceability": "Provide access and interfaces needed for correct service removal and reassembly",
+    }
+    return mapping.get(category, primary_function(inputs))
+
+
 def requirement_id_for_category(category: str) -> str:
     mapping = {
         "Crash / Safety": "REQ-CRASH-001",
         "Durability": "REQ-DUR-001",
-        "Joining / Durability": "REQ-JOIN-001",
-        "Manufacturing Quality": "REQ-JOIN-001",
+        "Joining / Durability": "REQ-JOIN-DUR-001",
+        "Manufacturing Quality": "REQ-JOIN-QUAL-001",
         "Corrosion": "REQ-COR-001",
         "Dimensional": "REQ-DIM-001",
         "Stamping / Formability": "REQ-MFG-001",
@@ -1070,11 +1173,36 @@ def requirement_id_for_category(category: str) -> str:
     return mapping.get(category, "REQ-GEN-001")
 
 
+def requirement_for_category(category: str) -> str:
+    """Return the engineering requirement statement linked to the Requirement ID."""
+    mapping = {
+        "Crash / Safety": "Control crash pulse, intrusion, deformation mode, and load-path response for applicable load cases",
+        "Durability": "Maintain structural function through the specified durability life without crack initiation",
+        "Joining / Durability": "Maintain joint load transfer through the specified durability life without weld fatigue separation",
+        "Manufacturing Quality": "Control weld nugget size, joint strength, and production process capability",
+        "Corrosion": "Control corrosion and coating coverage through the specified environmental exposure",
+        "Dimensional": "Control datum, interface, and body-build dimensional variation",
+        "Stamping / Formability": "Control thinning, wrinkling, splitting, and springback during forming",
+        "NVH": "Control local stiffness, modal response, and structure-borne noise",
+        "Attachment / Durability": "Maintain pull-out strength, torque retention, and attachment durability",
+        "Serviceability": "Provide tool clearance, access, and a feasible service sequence",
+    }
+    return mapping.get(category, "Meet the controlled component-level engineering requirement")
+
+
+def requirement_target_for_category(category: str) -> str:
+    """Expose missing quantitative targets instead of implying that a target is approved."""
+    return "TBD - enter controlled target value, unit, load case, and tolerance"
+
+
+def requirement_source_for_category(category: str) -> str:
+    """Reserve a traceable controlled-document reference for engineer completion."""
+    return "TBD - link controlled program requirement or released engineering standard"
+
+
 def revised_ratings(severity: int, occurrence: int, detection: int) -> tuple[int, int, int]:
-    revised_severity = severity
-    revised_occurrence = max(1, occurrence - 1)
-    revised_detection = max(1, detection - 1)
-    return revised_severity, revised_occurrence, revised_detection
+    """Do not claim risk reduction before an action has evidence of implementation."""
+    return severity, occurrence, detection
 
 
 def human_review_reason(
@@ -1083,18 +1211,23 @@ def human_review_reason(
     confidence: float,
     source_type: str,
     coverage_status: str | None = None,
+    source_match_type: str | None = None,
 ) -> str:
     reasons: list[str] = []
     if severity >= 8:
         reasons.append("Severity >= 8")
     if ap == "High":
         reasons.append("Action Priority = High")
-    if pd.isna(confidence) or confidence < 0.75:
+    if pd.isna(confidence):
+        reasons.append("AI Confidence Score unavailable without retrieved evidence")
+    elif confidence < 0.75:
         reasons.append("AI Confidence Score < 0.75")
     if source_type in {"Synthetic MVP Rule", "Rules-based draft"}:
         reasons.append(f"Source Type = {source_type}")
     if coverage_status in {"Gap", "Partial"}:
         reasons.append(f"Coverage Status = {coverage_status}")
+    if source_match_type == "Cross-component analog":
+        reasons.append("Retrieved source is a cross-component analog")
     return "; ".join(reasons) if reasons else "Standard engineer review"
 
 
@@ -1121,22 +1254,23 @@ def dfmea_row(
     revised_severity, revised_occurrence, revised_detection = revised_ratings(severity, occurrence, detection)
     revised_rpn = rpn(revised_severity, revised_occurrence, revised_detection)
     reduction = round((initial_rpn - revised_rpn) / initial_rpn, 3) if initial_rpn else 0
-    ap = action_priority(severity, occurrence, initial_rpn)
     ap_vda = aiag_vda_action_priority(severity, occurrence, detection)
+    ap = action_priority(severity, occurrence, detection)
     sc_flag = special_characteristic(severity, occurrence)
     end_effect = end_effect_for_category(category)
-    confidence = 0.7
-    source_type = "Synthetic MVP Rule"
+    confidence = float("nan")
+    source_type = "Rules-based draft"
     reason = human_review_reason(severity, ap, confidence, source_type)
-    final_text = f"{failure_mode}: {action}"
-
     return {
         "Failure Mode ID": "",
         "Function ID": function_id_for_category(category),
         "Requirement ID": requirement_id_for_category(category),
+        "Requirement": requirement_for_category(category),
+        "Requirement Target": requirement_target_for_category(category),
+        "Requirement Source": requirement_source_for_category(category),
         "Action ID": "",
         "Item": item_name(inputs),
-        "Function": primary_function(inputs),
+        "Function": function_for_category(category, inputs),
         "Risk Category": category,
         "Potential Failure Mode": failure_mode,
         "Potential Effect of Failure": effect,
@@ -1161,13 +1295,14 @@ def dfmea_row(
         "Revised Detection": revised_detection,
         "Revised RPN": revised_rpn,
         "RPN Reduction %": reduction,
-        "Residual Risk Level": residual_risk_level(revised_rpn),
-        "Action Owner": owner,
+        "Current Risk Level": residual_risk_level(initial_rpn),
+        "Projected Residual Risk Level": "",
+        "Action Owner": "",
         "Responsible Team": owner,
-        "Target Completion Date": "TBD",
+        "Target Completion Date": "",
         "Action Status": "Open",
-        "Closure Evidence": "TBD",
-        "Closure Notes": "Engineer Review Required",
+        "Closure Evidence": "",
+        "Closure Notes": "Open action: closure evidence has not been supplied",
         "Notes / Rationale": rationale,
         "AI Suggestion ID": "",
         "AI Confidence Score": confidence,
@@ -1176,18 +1311,19 @@ def dfmea_row(
         "Citation Count": 0,
         "Human Review Required": review_required(reason),
         "Reason for Human Review": reason,
-        "Future RAG Citation": "Not connected",
+        "Future RAG Citation": RAG_FALLBACK_LABEL,
         "Source Evidence": "",
         "Source File": "",
         "Source Sheet": "",
         "Source Row": "",
         "Source Chunk ID": "",
-        "AI Confidence": confidence,
+        "Source Component": "",
+        "Source Match Type": "No retrieved source",
         "Review Status": "Draft",
         "Engineer Decision": "Pending",
         "Rejection Reason": "",
-        "Final Approved Text": final_text,
-        "Reviewed By": "TBD",
+        "Final Approved Text": "",
+        "Reviewed By": "",
         "Review Date": "",
         "Approval Status": "Draft",
         "Approval Notes": "",
@@ -1620,18 +1756,26 @@ def dvp_row(
     team: str,
     notes: str,
     validation_status: str = "Planned",
-    pass_fail: str = "TBD",
+    pass_fail: str = "Not Run",
     test_id: str = "",
 ) -> dict[str, Any]:
     severity = int(dfmea_row_data.get("Severity", 0) or 0)
     ap = str(dfmea_row_data.get("Action Priority", "Low"))
-    confidence = 0.7
-    source_type = "Synthetic MVP Rule"
+    confidence = float("nan")
+    source_type = "Rules-based draft"
     reason = human_review_reason(severity, ap, confidence, source_type)
     profile = validation_profile(test, validation_type)
+    requirement_target = str(dfmea_row_data.get("Requirement Target", ""))
+    criteria_status = "Target Required" if not requirement_target or requirement_target.startswith("TBD") else "Draft"
     return {
         "Test ID": test_id,
+        "Item": dfmea_row_data.get("Item", ""),
+        "Function ID": dfmea_row_data.get("Function ID", ""),
+        "Function": dfmea_row_data.get("Function", ""),
         "Requirement ID": dfmea_row_data.get("Requirement ID", "REQ-GEN-001"),
+        "Requirement": dfmea_row_data.get("Requirement", ""),
+        "Requirement Target": requirement_target,
+        "Requirement Source": dfmea_row_data.get("Requirement Source", ""),
         "Linked Failure Mode ID": dfmea_row_data.get("Failure Mode ID", ""),
         "Linked Failure Mode": dfmea_row_data.get("Potential Failure Mode", ""),
         "Recommended Validation Test": test,
@@ -1646,16 +1790,17 @@ def dvp_row(
         "Test Duration / Cycles": profile["Test Duration / Cycles"],
         "Test Conditions": profile["Test Conditions"],
         "Acceptance Criteria": criteria,
-        "Planned Start Date": "TBD",
-        "Planned Completion Date": "TBD",
+        "Acceptance Criteria Status": criteria_status,
+        "Planned Start Date": "",
+        "Planned Completion Date": "",
         "Actual Completion Date": "",
         "Actual Result": "",
         "Pass / Fail": pass_fail,
         "Issue ID": "",
-        "Evidence Link": "TBD",
+        "Evidence Link": "",
         "Validation Status": validation_status,
         "Responsible Team": team,
-        "Test Owner": team,
+        "Test Owner": "",
         "Notes": notes,
         "AI Suggestion ID": "",
         "AI Confidence Score": confidence,
@@ -1664,18 +1809,19 @@ def dvp_row(
         "Citation Count": 0,
         "Human Review Required": review_required(reason),
         "Reason for Human Review": reason,
-        "Future RAG Citation": "Not connected",
+        "Future RAG Citation": RAG_FALLBACK_LABEL,
         "Source Evidence": "",
         "Source File": "",
         "Source Sheet": "",
         "Source Row": "",
         "Source Chunk ID": "",
-        "AI Confidence": confidence,
+        "Source Component": "",
+        "Source Match Type": "No retrieved source",
         "Review Status": "Draft",
         "Engineer Decision": "Pending",
         "Rejection Reason": "",
-        "Final Approved Text": f"{test}: {objective}",
-        "Reviewed By": "TBD",
+        "Final Approved Text": "",
+        "Reviewed By": "",
         "Review Date": "",
         "Approval Status": "Draft",
         "Approval Notes": "",
@@ -1699,7 +1845,7 @@ def validation_rows_for_failure(row: pd.Series, settings: dict[str, Any] | None 
         team: str,
         notes: str,
         validation_status: str = "Planned",
-        pass_fail: str = "TBD",
+        pass_fail: str = "Not Run",
         test_id: str = "",
     ) -> None:
         rows.append(
@@ -1851,7 +1997,7 @@ def validation_rows_for_failure(row: pd.Series, settings: dict[str, Any] | None 
                 "BIW / Validation / Manufacturing",
                 "AI-recommended closure for the open bracket or fastener pull-out validation gap.",
                 validation_status="Proposed",
-                pass_fail="TBD",
+                pass_fail="Not Run",
                 test_id="TEST-014",
             )
             rows[-1]["Test Method / Procedure"] = (
@@ -1919,16 +2065,20 @@ def generate_dvp(dfmea_df: pd.DataFrame, settings: dict[str, Any] | None = None)
 
     used_ids = {str(row.get("Test ID", "")).strip() for row in rows if str(row.get("Test ID", "")).strip()}
     next_id = 1
-    for index, row in enumerate(rows, start=1):
+    for row in rows:
         if not str(row.get("Test ID", "")).strip():
             while f"TEST-{next_id:03d}" in used_ids:
                 next_id += 1
             row["Test ID"] = f"TEST-{next_id:03d}"
             used_ids.add(row["Test ID"])
             next_id += 1
-        row["AI Suggestion ID"] = f"AI-DVPR-{index:03d}"
-
-    return sort_dvp_by_test_id(pd.DataFrame(rows, columns=DVP_COLUMNS))
+    dvp_df = sort_dvp_by_test_id(pd.DataFrame(rows, columns=DVP_COLUMNS))
+    for idx, row in dvp_df.iterrows():
+        test_number = test_id_sort_value(row.get("Test ID"))
+        dvp_df.at[idx, "AI Suggestion ID"] = (
+            f"AI-DVPR-{test_number:03d}" if test_number < 999999 else f"AI-DVPR-{idx + 1:03d}"
+        )
+    return dvp_df
 
 
 def test_id_sort_value(test_id: Any) -> int:
@@ -1969,6 +2119,10 @@ def coverage_assessment(dfmea_row_data: pd.Series, matches: pd.DataFrame) -> dic
     has_cae = "cae" in val_text
     has_physical = any(term in val_text for term in ["physical", "teardown", "pull-out", "crash validation"])
     has_acceptance = matches["Acceptance Criteria"].astype(str).str.strip().ne("").all()
+    target_required = (
+        "Acceptance Criteria Status" in matches.columns
+        and matches["Acceptance Criteria Status"].astype(str).eq("Target Required").any()
+    )
     has_evidence = matches["Evidence Link"].astype(str).str.strip().ne("").all()
     proposed = matches["Validation Status"].astype(str).str.contains("Proposed", case=False, na=False).any()
 
@@ -2015,12 +2169,22 @@ def coverage_assessment(dfmea_row_data: pd.Series, matches: pd.DataFrame) -> dic
             "Gap Description": "Validation acceptance criteria are missing.",
         }
 
+    if target_required:
+        return {
+            "Coverage Status": "Partial",
+            "Coverage Score": 50,
+            "Coverage Reason": "Validation methods are linked, but controlled quantitative targets and sources are still required.",
+            "Missing Validation Type": "Controlled target value, unit, tolerance, and requirement source",
+            "Recommended Additional Test": "Complete Requirement Target and Requirement Source, then approve the acceptance criteria.",
+            "Gap Description": "Acceptance logic exists but is not yet tied to a controlled measurable target.",
+        }
+
     if not has_evidence:
         score = 100 if has_cae and has_physical else 70
         return {
             "Coverage Status": "Covered",
             "Coverage Score": score,
-            "Coverage Reason": "Validation is planned. Evidence link remains TBD until execution.",
+            "Coverage Reason": "Validation is planned. Execution evidence has not yet been attached.",
             "Missing Validation Type": "",
             "Recommended Additional Test": "Attach evidence after test execution.",
             "Gap Description": "",
@@ -2064,14 +2228,18 @@ def generate_traceability(dfmea_df: pd.DataFrame, dvp_df: pd.DataFrame) -> pd.Da
         expected_improvement = "0% to 70%" if status == "Proposed Coverage" else ("0% to 70% after AI recommendation" if status == "Gap" else "")
         severity = int(dfmea_row_data.get("Severity", 0) or 0)
         ap = str(dfmea_row_data.get("Action Priority", "Low"))
-        confidence = 0.7
-        source_type = "Synthetic MVP Rule"
+        confidence = float("nan")
+        source_type = "Derived traceability"
         reason = human_review_reason(severity, ap, confidence, source_type, status)
 
         rows.append(
             {
                 "Requirement ID": dfmea_row_data.get("Requirement ID", ""),
+                "Requirement": dfmea_row_data.get("Requirement", ""),
+                "Requirement Target": dfmea_row_data.get("Requirement Target", ""),
+                "Requirement Source": dfmea_row_data.get("Requirement Source", ""),
                 "Function ID": dfmea_row_data.get("Function ID", ""),
+                "Function": dfmea_row_data.get("Function", ""),
                 "Failure Mode ID": fm_id,
                 "Failure Mode": dfmea_row_data.get("Potential Failure Mode", ""),
                 "Risk Category": dfmea_row_data.get("Risk Category", ""),
@@ -2101,11 +2269,11 @@ def generate_traceability(dfmea_df: pd.DataFrame, dvp_df: pd.DataFrame) -> pd.Da
                 "Citation Count": 0,
                 "Human Review Required": review_required(reason),
                 "Reason for Human Review": reason,
-                "Future RAG Citation": "Not connected",
+                "Future RAG Citation": RAG_FALLBACK_LABEL,
                 "Engineer Decision": "Pending",
                 "Rejection Reason": "",
-                "Final Approved Text": assessment["Coverage Reason"],
-                "Reviewed By": "TBD",
+                "Final Approved Text": "",
+                "Reviewed By": "",
                 "Review Date": "",
                 "Approval Status": "Draft",
                 "Approval Notes": "",
@@ -2278,11 +2446,12 @@ def generate_lessons(dfmea_df: pd.DataFrame) -> pd.DataFrame:
                         "Source Sheet": "",
                         "Source Row": "",
                         "Source Chunk ID": "",
-                        "AI Confidence": confidence,
+                        "Source Component": "",
+                        "Source Match Type": "No retrieved source",
                         "Review Status": "Draft",
                         "Rejection Reason": "",
-                        "Final Approved Text": lesson["Lesson Learned"],
-                        "Reviewed By": "TBD",
+                        "Final Approved Text": "",
+                        "Reviewed By": "",
                         "Review Date": "",
                         "Approval Status": "Draft",
                         "Approval Notes": "",
@@ -2290,6 +2459,28 @@ def generate_lessons(dfmea_df: pd.DataFrame) -> pd.DataFrame:
                     }
                 )
     return pd.DataFrame(rows, columns=LESSON_COLUMNS)
+
+
+def ground_drafts_for_session(
+    dfmea_df: pd.DataFrame,
+    dvp_df: pd.DataFrame,
+    lessons_df: pd.DataFrame,
+    inputs: dict[str, str],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Apply the same RAG grounding path to full and tab-specific generation."""
+    st.session_state.rag_error = ""
+    try:
+        grounded = ground_with_rag(dfmea_df, dvp_df, lessons_df, inputs)
+    except RAGGroundingError as exc:
+        st.session_state.rag_error = str(exc)
+        grounded = (
+            _mark_frame_as_rag_fallback(dfmea_df),
+            _mark_frame_as_rag_fallback(dvp_df),
+            _mark_frame_as_rag_fallback(lessons_df),
+            empty_df(RETRIEVED_SOURCES_COLUMNS),
+        )
+    st.session_state.retrieved_sources_df = grounded[3]
+    return grounded
 
 
 def generate_all() -> None:
@@ -2300,15 +2491,9 @@ def generate_all() -> None:
     trace_df = generate_traceability(dfmea_df, dvp_df)
     gap_df = generate_gap_analysis(trace_df)
     lessons_df = generate_lessons(dfmea_df)
-    st.session_state.rag_error = ""
-    try:
-        dfmea_df, dvp_df, lessons_df, retrieved_df = ground_with_rag(dfmea_df, dvp_df, lessons_df, inputs)
-    except RAGGroundingError as exc:
-        st.session_state.rag_error = str(exc)
-        dfmea_df = _mark_frame_as_rag_fallback(dfmea_df)
-        dvp_df = _mark_frame_as_rag_fallback(dvp_df)
-        lessons_df = _mark_frame_as_rag_fallback(lessons_df)
-        retrieved_df = empty_df(RETRIEVED_SOURCES_COLUMNS)
+    dfmea_df, dvp_df, lessons_df, retrieved_df = ground_drafts_for_session(
+        dfmea_df, dvp_df, lessons_df, inputs
+    )
     if st.session_state.get("llm_enrich_mode") and not RAG_IMPORT_ERROR:
         try:
             dfmea_df, dvp_df, llm_notes = apply_llm_enrichment(dfmea_df, dvp_df, inputs)
@@ -2318,7 +2503,6 @@ def generate_all() -> None:
     trace_df = generate_traceability(dfmea_df, dvp_df)
     gap_df = generate_gap_analysis(trace_df)
     gap_df = augment_gap_analysis(gap_df, dfmea_df, dvp_df, retrieved_df)
-    st.session_state.retrieved_sources_df = retrieved_df
     st.session_state.pdiag_df = generate_p_diagram(inputs)
     st.session_state.dfmea_df = dfmea_df
     st.session_state.dvp_df = dvp_df
@@ -2358,19 +2542,27 @@ def recalculate_dfmea_derived_fields(dfmea_df: pd.DataFrame) -> pd.DataFrame:
         dfmea_df.at[idx, "RPN"] = current_rpn
         dfmea_df.at[idx, "Revised RPN"] = revised_rpn
         dfmea_df.at[idx, "RPN Reduction %"] = (
-            round((initial_rpn - revised_rpn) / initial_rpn, 3) if initial_rpn else 0
+            round((current_rpn - revised_rpn) / current_rpn, 3) if current_rpn else 0
         )
         if all((current_s, current_o, current_d)):
-            ap = action_priority(current_s, current_o, current_rpn)
+            ap = action_priority(current_s, current_o, current_d)
             dfmea_df.at[idx, "Action Priority"] = ap
             dfmea_df.at[idx, "AP (AIAG-VDA)"] = aiag_vda_action_priority(current_s, current_o, current_d)
             dfmea_df.at[idx, "Special Characteristic"] = special_characteristic(current_s, current_o)
             confidence = pd.to_numeric(pd.Series([row.get("AI Confidence Score")]), errors="coerce").iloc[0]
             source_type = str(row.get("Source Type", ""))
-            reason = human_review_reason(current_s, ap, float(confidence), source_type)
+            reason = human_review_reason(
+                current_s,
+                ap,
+                float(confidence),
+                source_type,
+                source_match_type=str(row.get("Source Match Type", "")),
+            )
             dfmea_df.at[idx, "Reason for Human Review"] = reason
             dfmea_df.at[idx, "Human Review Required"] = review_required(reason)
-        dfmea_df.at[idx, "Residual Risk Level"] = residual_risk_level(revised_rpn)
+        dfmea_df.at[idx, "Current Risk Level"] = residual_risk_level(current_rpn)
+        revised_changed = (current_s, current_o, current_d) != (revised_s, revised_o, revised_d)
+        dfmea_df.at[idx, "Projected Residual Risk Level"] = residual_risk_level(revised_rpn) if revised_changed else ""
     return dfmea_df
 
 
@@ -2405,10 +2597,10 @@ def rag_confidence_average(*frames: pd.DataFrame) -> float | None:
     """Average confidence for rows that actually carry retrieved evidence."""
     values: list[float] = []
     for df in frames:
-        if df.empty or "Source Chunk ID" not in df.columns or "AI Confidence" not in df.columns:
+        if df.empty or "Source Chunk ID" not in df.columns or "AI Confidence Score" not in df.columns:
             continue
         grounded = df["Source Chunk ID"].fillna("").astype(str).str.strip().ne("")
-        confidence = pd.to_numeric(df.loc[grounded, "AI Confidence"], errors="coerce").dropna()
+        confidence = pd.to_numeric(df.loc[grounded, "AI Confidence Score"], errors="coerce").dropna()
         values.extend(float(value) for value in confidence)
     return round(sum(values) / len(values), 2) if values else None
 
@@ -2672,13 +2864,8 @@ def settings_dataframe() -> pd.DataFrame:
         ("Formula", "Initial RPN", "Initial Severity x Initial Occurrence x Initial Detection"),
         ("Formula", "Revised RPN", "Revised Severity x Revised Occurrence x Revised Detection"),
         ("Formula", "RPN Reduction %", "(Initial RPN - Revised RPN) / Initial RPN"),
-        (
-            "Action Priority Logic",
-            "High",
-            "Severity >= 9, or Severity >= 8 and Occurrence >= 4, or Severity >= 7 and RPN >= 120",
-        ),
-        ("Action Priority Logic", "Medium", "RPN >= 80 and not High"),
-        ("Action Priority Logic", "Low", "All remaining rows"),
+        ("Lifecycle", "Revised ratings", "Default to current ratings. Change only as an engineering projection supported by the recommended action; confirm after implementation and closure evidence."),
+        ("Action Priority Logic", "High / Medium / Low", "Readable label mapped directly from AP (AIAG-VDA) H / M / L"),
         ("AP (AIAG-VDA) Logic", "H / M / L", "Banded implementation of the AIAG-VDA 2019 Action Priority table driven by Severity, then Occurrence, then Detection - not an RPN threshold. Production must adopt the approved company AP table."),
         ("Special Characteristic Logic", "YC (Potential Critical)", "Severity 9-10: potential safety or regulatory effect - candidate critical characteristic"),
         ("Special Characteristic Logic", "SC (Potential Significant)", "Severity 5-8 with Occurrence >= 4 - candidate significant characteristic"),
@@ -3059,7 +3246,8 @@ def format_excel_workbook(writer: pd.ExcelWriter, tables: dict[str, pd.DataFrame
             "Special Characteristic",
             {"YC (Potential Critical)": high_fill, "SC (Potential Significant)": medium_fill},
         )
-        apply_status_fills(ws, "Residual Risk Level", {"High": high_fill, "Medium": medium_fill, "Low": low_fill})
+        apply_status_fills(ws, "Current Risk Level", {"High": high_fill, "Medium": medium_fill, "Low": low_fill})
+        apply_status_fills(ws, "Projected Residual Risk Level", {"High": high_fill, "Medium": medium_fill, "Low": low_fill})
         apply_status_fills(
             ws,
             "Coverage Status",
@@ -3673,15 +3861,26 @@ def render_dfmea() -> None:
     st.subheader("DFMEA")
     st.caption(
         "Includes stable IDs, vehicle-level end effects, special characteristic candidates (YC/SC), S/O/D, "
-        "RPN, AIAG-VDA Action Priority, residual risk, action tracking, and engineer review fields."
+        "RPN, AIAG-VDA Action Priority, function-to-requirement traceability, action tracking, and engineer review fields. "
+        "Revised ratings start equal to current ratings and should be reduced only when the action rationale supports the projection."
     )
     if st.button("Generate DFMEA"):
-        st.session_state.dfmea_df = generate_dfmea(component_inputs())
-        st.session_state.dvp_df = empty_df(DVP_COLUMNS)
+        inputs = component_inputs()
+        dfmea_df = generate_dfmea(inputs)
+        dvp_df = empty_df(DVP_COLUMNS)
+        lessons_df = generate_lessons(dfmea_df)
+        dfmea_df, dvp_df, lessons_df, _ = ground_drafts_for_session(
+            dfmea_df, dvp_df, lessons_df, inputs
+        )
+        st.session_state.dfmea_df = dfmea_df
+        st.session_state.dvp_df = dvp_df
         st.session_state.trace_df = empty_df(TRACE_COLUMNS)
         st.session_state.gap_df = empty_df(GAP_COLUMNS)
-        st.session_state.lessons_df = generate_lessons(st.session_state.dfmea_df)
-        st.success("DFMEA generated. Generate DVP&R next to create linked validation rows.")
+        st.session_state.lessons_df = lessons_df
+        if st.session_state.rag_error:
+            st.error(f"DFMEA generated, but {st.session_state.rag_error}")
+        else:
+            st.success("DFMEA generated with category-specific functions, requirements, and RAG evidence. Generate DVP&R next.")
     st.session_state.dfmea_df = st.data_editor(
         st.session_state.dfmea_df,
         num_rows="dynamic",
@@ -3694,6 +3893,9 @@ def render_dfmea() -> None:
             "Severity": st.column_config.NumberColumn(min_value=1, max_value=10, step=1),
             "Occurrence": st.column_config.NumberColumn(min_value=1, max_value=10, step=1),
             "Detection": st.column_config.NumberColumn(min_value=1, max_value=10, step=1),
+            "Revised Severity": st.column_config.NumberColumn(min_value=1, max_value=10, step=1),
+            "Revised Occurrence": st.column_config.NumberColumn(min_value=1, max_value=10, step=1),
+            "Revised Detection": st.column_config.NumberColumn(min_value=1, max_value=10, step=1),
             "RPN Reduction %": st.column_config.NumberColumn(format="percent"),
             "Special Characteristic": st.column_config.SelectboxColumn(options=SPECIAL_CHARACTERISTIC_VALUES),
             "AP (AIAG-VDA)": st.column_config.SelectboxColumn(options=["H", "M", "L"]),
@@ -3706,7 +3908,8 @@ def render_dfmea() -> None:
             "Special Characteristic",
             "Revised RPN",
             "RPN Reduction %",
-            "Residual Risk Level",
+            "Current Risk Level",
+            "Projected Residual Risk Level",
             "Human Review Required",
             "Reason for Human Review",
         ],
@@ -3720,12 +3923,33 @@ def render_dvp() -> None:
     st.subheader("DVP&R")
     st.caption("Expanded validation plan with test IDs, validation level, build phase, status, results, and evidence tracking.")
     if st.button("Generate DVP&R"):
+        inputs = component_inputs()
         if st.session_state.dfmea_df.empty:
-            st.session_state.dfmea_df = generate_dfmea(component_inputs())
-        st.session_state.dvp_df = generate_dvp(st.session_state.dfmea_df, generation_settings())
+            st.session_state.dfmea_df = generate_dfmea(inputs)
+        dvp_df = generate_dvp(st.session_state.dfmea_df, generation_settings())
+        lessons_df = (
+            st.session_state.lessons_df
+            if not st.session_state.lessons_df.empty
+            else generate_lessons(st.session_state.dfmea_df)
+        )
+        dfmea_df, dvp_df, lessons_df, retrieved_df = ground_drafts_for_session(
+            st.session_state.dfmea_df, dvp_df, lessons_df, inputs
+        )
+        st.session_state.dfmea_df = dfmea_df
+        st.session_state.dvp_df = dvp_df
+        st.session_state.lessons_df = lessons_df
         st.session_state.trace_df = generate_traceability(st.session_state.dfmea_df, st.session_state.dvp_df)
         st.session_state.gap_df = generate_gap_analysis(st.session_state.trace_df)
-        st.success("DVP&R generated and linked to DFMEA failure mode IDs.")
+        st.session_state.gap_df = augment_gap_analysis(
+            st.session_state.gap_df,
+            st.session_state.dfmea_df,
+            st.session_state.dvp_df,
+            retrieved_df,
+        )
+        if st.session_state.rag_error:
+            st.error(f"DVP&R generated, but {st.session_state.rag_error}")
+        else:
+            st.success("DVP&R generated, grounded, and linked to function, requirement, and failure-mode IDs.")
     st.session_state.dvp_df = st.data_editor(
         st.session_state.dvp_df,
         num_rows="dynamic",
@@ -3744,12 +3968,13 @@ def render_traceability() -> None:
     else:
         refresh_downstream_from_edits()
     trace_df = st.session_state.trace_df
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     c1.metric("Failure Modes", len(trace_df))
     c2.metric("Covered", safe_count(trace_df, "Coverage Status", "Covered"))
     c3.metric("Partial", safe_count(trace_df, "Coverage Status", "Partial"))
-    c4.metric("Gaps", safe_count(trace_df, "Coverage Status", "Gap"))
-    c5.metric("Coverage Score", f"{mean_numeric(trace_df, 'Coverage Score'):.0f}%")
+    c4.metric("Proposed", safe_count(trace_df, "Coverage Status", "Proposed Coverage"))
+    c5.metric("Gaps", safe_count(trace_df, "Coverage Status", "Gap"))
+    c6.metric("Coverage Score", f"{mean_numeric(trace_df, 'Coverage Score'):.0f}%")
     st.dataframe(trace_df, width="stretch", hide_index=True)
     st.download_button("Download Traceability CSV", dataframe_to_csv(trace_df), "traceability.csv", "text/csv")
 
