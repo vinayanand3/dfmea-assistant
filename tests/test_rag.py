@@ -22,9 +22,11 @@ import pytest
 from rag.loader import chunk_dataframe_rows, chunk_text_document, load_file_to_chunks
 from rag.llm import validate_llm_output
 from rag.prompt_builder import build_rag_prompt
+from rag.retriever import MIN_SIMILARITY, ranked_search
 from rag.store import VectorStore, chunk_hash
 
 KB_DIR = REPO / "data" / "knowledge_base"
+RAG_EVAL_DIR = REPO.parent / "rag_test_upload_docs"
 
 
 @pytest.fixture()
@@ -73,6 +75,44 @@ def test_duplicate_chunks_are_skipped(store):
     assert store.get_collection_stats()["chunks"] == first
 
 
+def test_duplicate_chunks_within_one_batch_are_skipped(store):
+    chunks = load_file_to_chunks(KB_DIR / "biw_weld_standard_ws_join_003.md", "Weld Standard", "Synthetic Demo")
+    assert chunks
+    assert store.add_chunks([chunks[0], chunks[0]]) == 1
+    assert store.get_collection_stats()["chunks"] == 1
+
+
+def test_reupload_replaces_stale_document_classification(store):
+    path = RAG_EVAL_DIR / "cae_report_roof_rail_beta.txt"
+    wrong = load_file_to_chunks(path, "Other", "Unknown")
+    corrected = load_file_to_chunks(path, "CAE Report", "CAE Report")
+    assert store.upsert_document(wrong) == 1
+    assert store.upsert_document(corrected) == 1
+    stats = store.get_collection_stats()
+    assert stats["documents"] == 1
+    assert stats["chunks"] == 1
+    assert stats["document_types"] == {"CAE Report": 1}
+    assert stats["source_strengths"] == {"CAE Report": 1}
+    assert store.search("roof rail", filters={"document_type": "Other"}) == []
+    assert store.search("roof rail", filters={"document_type": "CAE Report"})
+
+
+def test_missing_embedding_file_is_rebuilt(tmp_path):
+    path = tmp_path / "vs"
+    original = VectorStore(path)
+    chunks = load_file_to_chunks(KB_DIR / "biw_weld_standard_ws_join_003.md", "Weld Standard", "Synthetic Demo")
+    original.add_chunks(chunks)
+    (path / "embeddings.npy").unlink()
+    reloaded = VectorStore(path)
+    assert reloaded.search("spot weld pitch")
+    assert (path / "embeddings.npy").exists()
+
+
+def test_blank_query_returns_no_results(store):
+    store.add_chunks(load_file_to_chunks(KB_DIR / "biw_weld_standard_ws_join_003.md", "Weld Standard", "Synthetic Demo"))
+    assert store.search("   ") == []
+
+
 def test_retriever_returns_results(store):
     for name, dtype in [("historical_dfmea_biw.xlsx", "Historical DFMEA"), ("historical_dvpr_biw.xlsx", "Historical DVP&R")]:
         store.add_chunks(load_file_to_chunks(KB_DIR / name, dtype, "Synthetic Demo"))
@@ -80,6 +120,94 @@ def test_retriever_returns_results(store):
     assert results
     assert all(r["metadata"]["document_type"] == "Historical DFMEA" for r in results)
     assert results[0]["similarity"] >= results[-1]["similarity"]
+
+
+def test_question_bank_retrieval_quality(store):
+    """Regression gate for Recall@5, MRR, type precision, and the distractor corpus."""
+    corpus = [
+        ("historical_dfmea_front_rail_alpha.csv", "Historical DFMEA"),
+        ("historical_dvpr_front_rail_alpha.csv", "Historical DVP&R"),
+        ("lessons_learned_front_rail_and_underbody.md", "Lessons Learned"),
+        ("weld_standard_ws_join_017.md", "Weld Standard"),
+        ("corrosion_standard_ec_biw_041.md", "Corrosion Standard"),
+        ("cae_report_roof_rail_beta.txt", "CAE Report"),
+        ("distractor_infotainment_launch_issue.md", "Other"),
+    ]
+    for name, document_type in corpus:
+        store.add_chunks(load_file_to_chunks(RAG_EVAL_DIR / name, document_type, "Synthetic Demo"))
+
+    cases = [
+        ("front rail crash load-path folding outside intended crush zone", "Historical DFMEA", "historical_dfmea_front_rail_alpha.csv"),
+        ("DVP&R test to close front rail crash load-path folding risk", "Historical DVP&R", "historical_dvpr_front_rail_alpha.csv"),
+        ("front rail flange weld pitch", "Weld Standard", "weld_standard_ws_join_017.md"),
+        ("corrosion design change front rail closed overlap flange", "Corrosion Standard", "corrosion_standard_ec_biw_041.md"),
+        ("service bracket fastener pull-out risk", "Historical DFMEA", "historical_dfmea_front_rail_alpha.csv"),
+        ("roof rail gauge question", "CAE Report", "cae_report_roof_rail_beta.txt"),
+        ("irrelevant document for BIW risk retrieval", "Other", "distractor_infotainment_launch_issue.md"),
+    ]
+    reciprocal_ranks = []
+    for query, document_type, expected_file in cases:
+        results = store.search(query, top_k=5, filters={"document_type": document_type})
+        files = [result["metadata"].get("file_name") for result in results]
+        assert expected_file in files, f"{expected_file} missed Recall@5 for: {query}"
+        reciprocal_ranks.append(1 / (files.index(expected_file) + 1))
+        assert all(result["metadata"].get("document_type") == document_type for result in results)
+
+    assert sum(reciprocal_ranks) / len(reciprocal_ranks) >= 0.85
+
+
+def test_component_conflict_rerank_demotes_roof_rail_for_front_rail_query(store):
+    corpus = [
+        ("historical_dfmea_front_rail_alpha.csv", "Historical DFMEA"),
+        ("lessons_learned_front_rail_and_underbody.md", "Lessons Learned"),
+        ("cae_report_roof_rail_beta.txt", "CAE Report"),
+    ]
+    for name, document_type in corpus:
+        store.add_chunks(load_file_to_chunks(RAG_EVAL_DIR / name, document_type, "Synthetic Demo"))
+    results = ranked_search(store, "front rail crash folding", top_k=5)
+    files = [result["metadata"].get("file_name") for result in results]
+    assert files[0] == "historical_dfmea_front_rail_alpha.csv"
+    assert files.index("lessons_learned_front_rail_and_underbody.md") < files.index("cae_report_roof_rail_beta.txt")
+    roof = next(result for result in results if result["metadata"].get("file_name") == "cae_report_roof_rail_beta.txt")
+    assert roof["ranking_score"] < roof["similarity"]
+
+
+def test_all_type_search_hides_unrelated_distractor_but_can_find_it_explicitly(store):
+    corpus = [
+        ("historical_dfmea_front_rail_alpha.csv", "Historical DFMEA"),
+        ("historical_dvpr_front_rail_alpha.csv", "Historical DVP&R"),
+        ("lessons_learned_front_rail_and_underbody.md", "Lessons Learned"),
+        ("distractor_infotainment_launch_issue.md", "Other"),
+    ]
+    for name, document_type in corpus:
+        store.add_chunks(load_file_to_chunks(RAG_EVAL_DIR / name, document_type, "Synthetic Demo"))
+
+    results = ranked_search(
+        store,
+        "What DVP&R test should close the front rail crash load-path folding risk?",
+        top_k=10,
+    )
+    visible = [
+        result
+        for result in results
+        if result["similarity"] >= MIN_SIMILARITY
+        and result.get("ranking_score", result["similarity"]) >= MIN_SIMILARITY
+    ]
+    files = [result["metadata"].get("file_name") for result in visible]
+    assert visible[0]["metadata"].get("document_type") == "Historical DVP&R"
+    assert "historical_dvpr_front_rail_alpha.csv" in files
+    assert "distractor_infotainment_launch_issue.md" not in files
+
+    negative_example_results = ranked_search(
+        store,
+        "Which uploaded document is irrelevant to BIW risk retrieval?",
+        top_k=5,
+        filters={"document_type": "Other"},
+    )
+    assert negative_example_results
+    distractor = negative_example_results[0]
+    assert distractor["metadata"].get("file_name") == "distractor_infotainment_launch_issue.md"
+    assert distractor["ranking_score"] == distractor["similarity"]
 
 
 def test_no_rag_fallback_works(store):
@@ -158,7 +286,30 @@ def test_app_generation_has_source_fields_and_gap_analysis(tmp_path):
     app.seed_knowledge_base(store)
     g_dfmea, g_dvp, g_lessons, retrieved = app.ground_with_rag(dfmea, dvp, lessons, inputs)
     assert (g_dfmea["Source Chunk ID"].astype(str) != "").sum() > 0, "no DFMEA rows grounded"
+    assert (g_dvp["Source Chunk ID"].astype(str) != "").sum() > 0, "no DVP&R rows grounded"
     assert not retrieved.empty
+    grounded_rows = pd.concat([g_dfmea, g_dvp, g_lessons], ignore_index=True)
+    grounded_rows = grounded_rows[grounded_rows["Source Chunk ID"].fillna("").astype(str).ne("")]
+    assert not grounded_rows.empty
+    assert grounded_rows["Source Row"].map(lambda value: isinstance(value, str)).all()
+    assert grounded_rows["AI Confidence"].notna().all()
+
+    fallback_rows = g_dfmea[g_dfmea["Source Chunk ID"].fillna("").astype(str).eq("")]
+    if not fallback_rows.empty:
+        assert fallback_rows["AI Confidence"].isna().all()
+
+    edited = g_dfmea.head(1).copy()
+    edited.loc[:, ["Initial Severity", "Initial Occurrence", "Initial Detection"]] = [9, 4, 5]
+    edited.loc[:, ["Severity", "Occurrence", "Detection"]] = [8, 4, 5]
+    edited.loc[:, ["Revised Severity", "Revised Occurrence", "Revised Detection"]] = [8, 2, 3]
+    recalculated = app.recalculate_dfmea_derived_fields(edited)
+    assert recalculated.iloc[0]["Initial RPN"] == 180
+    assert recalculated.iloc[0]["RPN"] == 160
+    assert recalculated.iloc[0]["Revised RPN"] == 48
+    assert recalculated.iloc[0]["RPN Reduction %"] == pytest.approx(0.733)
+    assert recalculated.iloc[0]["Action Priority"] == "High"
+    assert recalculated.iloc[0]["AP (AIAG-VDA)"] == "H"
+    assert recalculated.iloc[0]["Residual Risk Level"] == "Low"
 
     trace = app.generate_traceability(g_dfmea, g_dvp)
     gaps = app.generate_gap_analysis(trace)

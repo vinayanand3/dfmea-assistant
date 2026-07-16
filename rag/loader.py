@@ -103,10 +103,11 @@ def chunk_text_document(
         window = words[start : start + CHUNK_WORDS]
         chunk_text = " ".join(window)
         if len(chunk_text.strip()) >= 80:
+            stored_text = f"Document Type: {document_type}\n{chunk_text}"
             chunks.append(
                 {
-                    "chunk_id": chunk_hash(file_name, "text", index, chunk_text),
-                    "chunk_text": f"Document Type: {document_type}\n{chunk_text}",
+                    "chunk_id": chunk_hash(file_name, "text", index, stored_text),
+                    "chunk_text": stored_text,
                     "metadata": {
                         "file_name": file_name,
                         "sheet_name": "text",

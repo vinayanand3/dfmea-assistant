@@ -5,3 +5,5 @@ __pycache__/
 .streamlit/secrets.toml
 data/vector_store/
 data/uploaded_docs/
+.playwright-cli/
+output/playwright/

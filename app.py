@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import date
@@ -52,12 +53,6 @@ FINAL_PITCH_POSITIONING = (
     "The goal is to test whether AI can help BIW engineers generate first-draft DFMEA content, "
     "recommend DVP&R validation items, calculate risk priority, link risks to validation coverage, "
     "and flag gaps for engineer review. The engineer remains the final decision-maker."
-)
-DEMO_STORY = (
-    "For the front rail reinforcement example, the tool generated 9 DFMEA failure modes, identified "
-    "4 high-severity risks, recommended or proposed 14 DVP&R validation items, calculated initial "
-    "and revised RPN, estimated 43% residual risk reduction, reused 8 lessons learned, and identified "
-    "1 high-priority validation gap with a proposed closure test."
 )
 DASHBOARD_FOOTNOTES = [
     "RPN = Severity x Occurrence x Detection.",
@@ -395,7 +390,13 @@ try:
     from rag import config as rag_config
     from rag.llm import generate_llm_enrichment, llm_status
     from rag.prompt_builder import build_rag_prompt
-    from rag.retriever import best_match_for_row, citation_label, retrieve_groups
+    from rag.retriever import (
+        MIN_SIMILARITY,
+        best_match_for_row,
+        citation_label,
+        ranked_search,
+        retrieve_groups,
+    )
 
     RAG_IMPORT_ERROR = ""
     VECTOR_DB_PATH = Path(rag_config.VECTOR_DB_PATH)
@@ -412,6 +413,12 @@ RAG_DISCLAIMER = (
     "are required before release."
 )
 RAG_FALLBACK_LABEL = "No RAG source found - rule-based draft"
+
+
+class RAGGroundingError(RuntimeError):
+    """Raised when indexed evidence cannot be attached safely to generated rows."""
+
+
 RAG_DOC_TYPES = [
     "Historical DFMEA",
     "Historical DVP&R",
@@ -479,6 +486,25 @@ def _confidence_from_similarity(similarity: float) -> float:
     return round(min(0.95, 0.5 + similarity / 2), 2)
 
 
+def _mark_frame_as_rag_fallback(df: pd.DataFrame) -> pd.DataFrame:
+    """Label rows as ungrounded without assigning artificial RAG confidence."""
+    df = df.copy()
+    if df.empty:
+        return df
+    if "Future RAG Citation" in df.columns:
+        df["Future RAG Citation"] = RAG_FALLBACK_LABEL
+    if "Source Evidence" in df.columns:
+        df["Source Evidence"] = RAG_FALLBACK_LABEL
+    if "Source Type" in df.columns:
+        df["Source Type"] = "Rules-based draft"
+    if "Citation Count" in df.columns:
+        df["Citation Count"] = 0
+    for column in ("AI Confidence", "AI Confidence Score"):
+        if column in df.columns:
+            df[column] = float("nan")
+    return df
+
+
 def _ground_frame(
     df: pd.DataFrame,
     text_columns: list[str],
@@ -495,10 +521,9 @@ def _ground_frame(
         row_text = " ".join(str(row.get(col, "")) for col in text_columns)
         match = best_match_for_row(store, row_text, document_type)
         if match is None:
-            if "Future RAG Citation" in df.columns:
-                df.at[idx, "Future RAG Citation"] = RAG_FALLBACK_LABEL
-            if "Source Evidence" in df.columns:
-                df.at[idx, "Source Evidence"] = RAG_FALLBACK_LABEL
+            fallback = _mark_frame_as_rag_fallback(df.loc[[idx]])
+            for column in fallback.columns:
+                df.at[idx, column] = fallback.at[idx, column]
             continue
         meta = match.get("metadata", {})
         confidence = _confidence_from_similarity(match["similarity"])
@@ -520,7 +545,9 @@ def _ground_frame(
         if "Source Sheet" in df.columns:
             df.at[idx, "Source Sheet"] = meta.get("sheet_name", "")
         if "Source Row" in df.columns:
-            df.at[idx, "Source Row"] = meta.get("row_number", "")
+            # Generated source columns use string dtype under modern pandas.
+            # Normalize row identifiers so grounding cannot fail on integer metadata.
+            df.at[idx, "Source Row"] = str(meta.get("row_number", "") or "")
         if "Source Chunk ID" in df.columns:
             df.at[idx, "Source Chunk ID"] = match.get("chunk_id", "")
         if "AI Confidence" in df.columns:
@@ -551,14 +578,28 @@ def ground_with_rag(
     lessons_df: pd.DataFrame,
     inputs: dict[str, str],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Ground generated drafts with knowledge-base citations. Never breaks generation."""
+    """Ground generated drafts with knowledge-base citations.
+
+    Raises RAGGroundingError when indexed evidence exists but cannot be attached.
+    The UI catches this and keeps the rules-based draft while showing a visible error.
+    """
     empty_log = empty_df(RETRIEVED_SOURCES_COLUMNS)
     if RAG_IMPORT_ERROR:
-        return dfmea_df, dvp_df, lessons_df, empty_log
+        return (
+            _mark_frame_as_rag_fallback(dfmea_df),
+            _mark_frame_as_rag_fallback(dvp_df),
+            _mark_frame_as_rag_fallback(lessons_df),
+            empty_log,
+        )
     try:
         store = get_rag_store()
         if store.get_collection_stats()["chunks"] == 0:
-            return dfmea_df, dvp_df, lessons_df, empty_log
+            return (
+                _mark_frame_as_rag_fallback(dfmea_df),
+                _mark_frame_as_rag_fallback(dvp_df),
+                _mark_frame_as_rag_fallback(lessons_df),
+                empty_log,
+            )
         retrieved_log: list[dict[str, Any]] = []
         dfmea_df = _ground_frame(
             dfmea_df,
@@ -605,8 +646,8 @@ def ground_with_rag(
                 )
         retrieved_df = pd.DataFrame(retrieved_log, columns=RETRIEVED_SOURCES_COLUMNS)
         return dfmea_df, dvp_df, lessons_df, retrieved_df
-    except Exception:
-        return dfmea_df, dvp_df, lessons_df, empty_log
+    except Exception as exc:
+        raise RAGGroundingError(f"RAG grounding failed: {exc}") from exc
 
 
 def apply_llm_enrichment(
@@ -850,6 +891,10 @@ def init_state() -> None:
     st.session_state.setdefault("retrieved_sources_df", empty_df(RETRIEVED_SOURCES_COLUMNS))
     st.session_state.setdefault("llm_enrich_mode", False)
     st.session_state.setdefault("llm_notes", [])
+    st.session_state.setdefault("rag_error", "")
+    st.session_state.setdefault("kb_upload_nonce", 0)
+    st.session_state.setdefault("kb_upload_message", "")
+    st.session_state.setdefault("kb_action_message", "")
     st.session_state.setdefault("last_generated", False)
     # Auto-seed the knowledge base so RAG works out of the box (incl. ephemeral HF Spaces).
     if not RAG_IMPORT_ERROR and not st.session_state.get("kb_seed_attempted"):
@@ -1044,10 +1089,10 @@ def human_review_reason(
         reasons.append("Severity >= 8")
     if ap == "High":
         reasons.append("Action Priority = High")
-    if confidence < 0.75:
+    if pd.isna(confidence) or confidence < 0.75:
         reasons.append("AI Confidence Score < 0.75")
-    if source_type == "Synthetic MVP Rule":
-        reasons.append("Source Type = Synthetic MVP Rule")
+    if source_type in {"Synthetic MVP Rule", "Rules-based draft"}:
+        reasons.append(f"Source Type = {source_type}")
     if coverage_status in {"Gap", "Partial"}:
         reasons.append(f"Coverage Status = {coverage_status}")
     return "; ".join(reasons) if reasons else "Standard engineer review"
@@ -2255,7 +2300,15 @@ def generate_all() -> None:
     trace_df = generate_traceability(dfmea_df, dvp_df)
     gap_df = generate_gap_analysis(trace_df)
     lessons_df = generate_lessons(dfmea_df)
-    dfmea_df, dvp_df, lessons_df, retrieved_df = ground_with_rag(dfmea_df, dvp_df, lessons_df, inputs)
+    st.session_state.rag_error = ""
+    try:
+        dfmea_df, dvp_df, lessons_df, retrieved_df = ground_with_rag(dfmea_df, dvp_df, lessons_df, inputs)
+    except RAGGroundingError as exc:
+        st.session_state.rag_error = str(exc)
+        dfmea_df = _mark_frame_as_rag_fallback(dfmea_df)
+        dvp_df = _mark_frame_as_rag_fallback(dvp_df)
+        lessons_df = _mark_frame_as_rag_fallback(lessons_df)
+        retrieved_df = empty_df(RETRIEVED_SOURCES_COLUMNS)
     if st.session_state.get("llm_enrich_mode") and not RAG_IMPORT_ERROR:
         try:
             dfmea_df, dvp_df, llm_notes = apply_llm_enrichment(dfmea_df, dvp_df, inputs)
@@ -2275,6 +2328,52 @@ def generate_all() -> None:
     st.session_state.last_generated = True
 
 
+def recalculate_dfmea_derived_fields(dfmea_df: pd.DataFrame) -> pd.DataFrame:
+    """Keep risk calculations consistent after engineers edit rating columns."""
+    if dfmea_df.empty:
+        return dfmea_df
+    dfmea_df = dfmea_df.copy()
+
+    def rating(value: Any) -> int:
+        numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+        if pd.isna(numeric):
+            return 0
+        return max(1, min(10, int(numeric)))
+
+    for idx, row in dfmea_df.iterrows():
+        initial_s = rating(row.get("Initial Severity"))
+        initial_o = rating(row.get("Initial Occurrence"))
+        initial_d = rating(row.get("Initial Detection"))
+        current_s = rating(row.get("Severity"))
+        current_o = rating(row.get("Occurrence"))
+        current_d = rating(row.get("Detection"))
+        revised_s = rating(row.get("Revised Severity"))
+        revised_o = rating(row.get("Revised Occurrence"))
+        revised_d = rating(row.get("Revised Detection"))
+
+        initial_rpn = rpn(initial_s, initial_o, initial_d) if all((initial_s, initial_o, initial_d)) else 0
+        current_rpn = rpn(current_s, current_o, current_d) if all((current_s, current_o, current_d)) else 0
+        revised_rpn = rpn(revised_s, revised_o, revised_d) if all((revised_s, revised_o, revised_d)) else 0
+        dfmea_df.at[idx, "Initial RPN"] = initial_rpn
+        dfmea_df.at[idx, "RPN"] = current_rpn
+        dfmea_df.at[idx, "Revised RPN"] = revised_rpn
+        dfmea_df.at[idx, "RPN Reduction %"] = (
+            round((initial_rpn - revised_rpn) / initial_rpn, 3) if initial_rpn else 0
+        )
+        if all((current_s, current_o, current_d)):
+            ap = action_priority(current_s, current_o, current_rpn)
+            dfmea_df.at[idx, "Action Priority"] = ap
+            dfmea_df.at[idx, "AP (AIAG-VDA)"] = aiag_vda_action_priority(current_s, current_o, current_d)
+            dfmea_df.at[idx, "Special Characteristic"] = special_characteristic(current_s, current_o)
+            confidence = pd.to_numeric(pd.Series([row.get("AI Confidence Score")]), errors="coerce").iloc[0]
+            source_type = str(row.get("Source Type", ""))
+            reason = human_review_reason(current_s, ap, float(confidence), source_type)
+            dfmea_df.at[idx, "Reason for Human Review"] = reason
+            dfmea_df.at[idx, "Human Review Required"] = review_required(reason)
+        dfmea_df.at[idx, "Residual Risk Level"] = residual_risk_level(revised_rpn)
+    return dfmea_df
+
+
 def refresh_downstream_from_edits() -> None:
     st.session_state.trace_df = generate_traceability(st.session_state.dfmea_df, st.session_state.dvp_df)
     gap_df = generate_gap_analysis(st.session_state.trace_df)
@@ -2284,7 +2383,6 @@ def refresh_downstream_from_edits() -> None:
         st.session_state.dvp_df,
         st.session_state.get("retrieved_sources_df", empty_df(RETRIEVED_SOURCES_COLUMNS)),
     )
-    st.session_state.lessons_df = generate_lessons(st.session_state.dfmea_df)
 
 
 def dataframe_to_csv(df: pd.DataFrame) -> bytes:
@@ -2301,6 +2399,43 @@ def mean_numeric(df: pd.DataFrame, column: str) -> float:
     if df.empty or column not in df:
         return 0.0
     return float(pd.to_numeric(df[column], errors="coerce").fillna(0).mean())
+
+
+def rag_confidence_average(*frames: pd.DataFrame) -> float | None:
+    """Average confidence for rows that actually carry retrieved evidence."""
+    values: list[float] = []
+    for df in frames:
+        if df.empty or "Source Chunk ID" not in df.columns or "AI Confidence" not in df.columns:
+            continue
+        grounded = df["Source Chunk ID"].fillna("").astype(str).str.strip().ne("")
+        confidence = pd.to_numeric(df.loc[grounded, "AI Confidence"], errors="coerce").dropna()
+        values.extend(float(value) for value in confidence)
+    return round(sum(values) / len(values), 2) if values else None
+
+
+def demo_story(
+    dfmea_df: pd.DataFrame,
+    dvp_df: pd.DataFrame,
+    gap_df: pd.DataFrame,
+    lessons_df: pd.DataFrame,
+) -> str:
+    """Build the narrative from live results so it cannot disagree with KPI values."""
+    high_severity = len(dfmea_df[dfmea_df["Severity"] >= 8]) if not dfmea_df.empty else 0
+    avg_initial = mean_numeric(dfmea_df, "Initial RPN")
+    avg_revised = mean_numeric(dfmea_df, "Revised RPN")
+    reduction = (avg_initial - avg_revised) / avg_initial if avg_initial else 0
+    high_priority_gaps = len(gap_df[gap_df["Priority"].eq("High")]) if not gap_df.empty else 0
+    grounded = sum(
+        int(df.get("Source Chunk ID", pd.Series(dtype=str)).fillna("").astype(str).str.strip().ne("").sum())
+        for df in (dfmea_df, dvp_df, lessons_df)
+        if not df.empty
+    )
+    return (
+        f"The tool generated {len(dfmea_df)} DFMEA failure modes, identified {high_severity} high-severity risks, "
+        f"recommended or proposed {len(dvp_df)} DVP&R validation items, estimated {reduction:.0%} residual risk "
+        f"reduction, reused {len(lessons_df)} lessons learned, attached source evidence to {grounded} rows, and "
+        f"identified {high_priority_gaps} high-priority validation gap or closure item(s)."
+    )
 
 
 def dashboard_dataframe(
@@ -2405,13 +2540,7 @@ def dashboard_dataframe(
                 if not dfmea_df.empty and "Source Chunk ID" in dfmea_df.columns
                 else 0
             )
-            avg_conf = 0.0
-            if total_rows:
-                avg_conf = round(
-                    (mean_numeric(dfmea_df, "AI Confidence") * len(dfmea_df) + mean_numeric(dvp_df, "AI Confidence") * len(dvp_df))
-                    / total_rows,
-                    2,
-                )
+            avg_conf = rag_confidence_average(dfmea_df, dvp_df)
             sources_used = int((retrieved_df["Used In Output"].astype(str) == "Yes").sum()) if not retrieved_df.empty else 0
             rag_rows = [
                 ("RAG KPI", "Total Documents Indexed", stats["documents"], ""),
@@ -2421,7 +2550,7 @@ def dashboard_dataframe(
                 ("RAG KPI", "DVP&R Rows with Source Evidence", dvp_grounded, ""),
                 ("RAG KPI", "Rows Using Rule-Based Fallback", fallback_rows, ""),
                 ("RAG KPI", "High-Risk Items Without Source Evidence", high_risk_no_source, ""),
-                ("RAG KPI", "Average AI Confidence", avg_conf, ""),
+                ("RAG KPI", "Average RAG Confidence", avg_conf if avg_conf is not None else "Not available", ""),
             ]
         except Exception:
             rag_rows = []
@@ -2487,7 +2616,7 @@ def management_summary_dataframe(
         ),
         (
             "Demo Story",
-            DEMO_STORY,
+            demo_story(dfmea_df, dvp_df, gap_df, lessons_df),
         ),
         (
             "Demo Story Takeaway",
@@ -2717,7 +2846,7 @@ def build_report(
 
 ## Demo Story
 
-{DEMO_STORY}
+{demo_story(dfmea_df, dvp_df, gap_df, lessons_df)}
 
 ## Dashboard Footnotes
 
@@ -3198,7 +3327,7 @@ def render_header() -> None:
 
     with st.sidebar:
         st.subheader("Prototype Mode")
-        st.caption("Rules-based generator is active. OpenAI and RAG can be added later as generation providers.")
+        st.caption("Retrieval-grounded rules generation is active. Optional LLM enrichment can add cited suggestions.")
         if PART_EXAMPLES:
             labels = list(PART_EXAMPLES)
             current_label = selected_part_label()
@@ -3241,7 +3370,10 @@ def render_header() -> None:
         st.divider()
         if st.button("Generate Drafts", type="primary", width="stretch"):
             generate_all()
-            st.toast("Drafts generated.")
+            if st.session_state.rag_error:
+                st.error(f"Drafts generated, but {st.session_state.rag_error}")
+            else:
+                st.toast("Drafts generated with operational RAG grounding.")
 
 
 def render_input() -> None:
@@ -3293,7 +3425,10 @@ def render_input() -> None:
 
     if st.button("Generate Drafts", type="primary"):
         generate_all()
-        st.success("P-Diagram, draft DFMEA, DVP&R, traceability, gaps, dashboard, and lessons generated.")
+        if st.session_state.rag_error:
+            st.error(f"Drafts generated, but {st.session_state.rag_error}")
+        else:
+            st.success("P-Diagram, grounded DFMEA, DVP&R, traceability, gaps, dashboard, and lessons generated.")
 
 
 def render_knowledge_base() -> None:
@@ -3311,21 +3446,33 @@ def render_knowledge_base() -> None:
     c3.metric("Document Types", len(stats["document_types"]))
     c4.metric("Embedding", "Semantic" if "MiniLM" in stats["embedding_model"] else "Fallback")
     st.caption(f"Embedding model: {stats['embedding_model']} · Store: {stats['path']}")
+    if action_message := st.session_state.pop("kb_action_message", ""):
+        st.success(action_message)
 
     col_seed, col_clear = st.columns(2)
     with col_seed:
         if st.button("Seed synthetic demo corpus", help="Index the bundled prior-program DFMEA/DVP&R/lessons/standards demo files."):
             added = seed_knowledge_base(store)
-            st.success(f"Indexed {added} new chunks from the synthetic corpus.")
+            st.session_state.kb_action_message = (
+                f"Synthetic corpus processed. Indexed {added} new chunks; existing duplicates were preserved."
+            )
             st.rerun()
     with col_clear:
         if st.button("Clear knowledge base", help="Delete all indexed chunks and embeddings."):
             store.delete_collection()
-            st.success("Knowledge base cleared.")
+            st.session_state.retrieved_sources_df = empty_df(RETRIEVED_SOURCES_COLUMNS)
+            st.session_state.dfmea_df = _mark_frame_as_rag_fallback(st.session_state.dfmea_df)
+            st.session_state.dvp_df = _mark_frame_as_rag_fallback(st.session_state.dvp_df)
+            st.session_state.lessons_df = _mark_frame_as_rag_fallback(st.session_state.lessons_df)
+            st.session_state.kb_action_message = "Knowledge base cleared. Existing generated rows were marked as RAG fallback."
             st.rerun()
 
     st.divider()
     st.markdown("**Upload engineering documents** (synthetic or approved non-confidential files only)")
+    if upload_message := st.session_state.pop("kb_upload_message", ""):
+        level = upload_message.get("level", "success") if isinstance(upload_message, dict) else "success"
+        text = upload_message.get("text", "") if isinstance(upload_message, dict) else str(upload_message)
+        getattr(st, level, st.info)(text)
     up1, up2 = st.columns(2)
     with up1:
         doc_type = st.selectbox("Document type", RAG_DOC_TYPES, key="kb_doc_type")
@@ -3341,46 +3488,153 @@ def render_knowledge_base() -> None:
         "Files (.xlsx, .csv, .md, .txt, .pdf, .docx)",
         type=["xlsx", "csv", "md", "txt", "pdf", "docx"],
         accept_multiple_files=True,
-        key="kb_uploads",
+        key=f"kb_uploads_{st.session_state.kb_upload_nonce}",
     )
+    if uploads and len(uploads) > 1:
+        st.caption(f"All {len(uploads)} files will be indexed as {doc_type}. Upload separately when document types differ.")
     if uploads and st.button("Process files", type="primary"):
         KB_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         total = 0
+        processed = 0
+        unchanged = 0
+        failures: list[str] = []
         for file in uploads:
-            saved = KB_UPLOAD_DIR / file.name
-            saved.write_bytes(file.getvalue())
-            chunks = load_file_to_chunks(saved, doc_type, strength, file_bytes=file.getvalue())
-            for chunk in chunks:
-                if component_hint and not chunk["metadata"].get("component_name"):
-                    chunk["metadata"]["component_name"] = component_hint
-                if upload_notes:
-                    chunk["metadata"]["notes"] = upload_notes
-            total += store.add_chunks(chunks)
-        st.success(f"Indexed {total} new chunks from {len(uploads)} file(s). Duplicates were skipped.")
+            try:
+                saved = KB_UPLOAD_DIR / file.name
+                file_bytes = file.getvalue()
+                chunks = load_file_to_chunks(saved, doc_type, strength, file_bytes=file_bytes)
+                if not chunks:
+                    failures.append(f"{file.name}: no indexable content found")
+                    continue
+                for chunk in chunks:
+                    if component_hint and not chunk["metadata"].get("component_name"):
+                        chunk["metadata"]["component_name"] = component_hint
+                    if upload_notes:
+                        chunk["metadata"]["notes"] = upload_notes
+                changed = store.upsert_document(chunks)
+                if changed:
+                    total += changed
+                else:
+                    unchanged += 1
+                saved.write_bytes(file_bytes)
+                processed += 1
+            except Exception as exc:
+                failures.append(f"{file.name}: {exc}")
+        message_parts = [
+            f"Processed {processed} of {len(uploads)} file(s)",
+            f"indexed or updated {total} chunks",
+        ]
+        if unchanged:
+            message_parts.append(f"{unchanged} unchanged duplicate file(s)")
+        if failures:
+            message_parts.append("Issues: " + "; ".join(failures))
+        message_parts.append("The upload selection has been cleared")
+        st.session_state.kb_upload_message = {
+            "level": "warning" if failures or not total else "success",
+            "text": ". ".join(message_parts) + ".",
+        }
+        st.session_state.kb_upload_nonce += 1
         st.rerun()
 
     st.divider()
     st.markdown("**Search preview** — check what the assistant would retrieve")
+    preview_type = st.selectbox(
+        "Retrieval document type",
+        ["All document types"] + RAG_DOC_TYPES,
+        key="kb_query_document_type",
+        help="Choose the same document-type constraint used during DFMEA, DVP&R, lessons, or standards grounding.",
+    )
     query = st.text_input("Query", key="kb_query", placeholder="e.g. spot weld fatigue on high-strength steel rail flange")
-    if query:
-        results = store.search(query, top_k=5)
+    clean_query = query.strip()
+    if query and not clean_query:
+        st.warning("Enter at least one non-space search term.")
+    if clean_query:
+        filters = None if preview_type == "All document types" else {"document_type": preview_type}
+        results = [
+            result
+            for result in ranked_search(store, clean_query, top_k=10, filters=filters)
+            if float(result.get("similarity", 0)) >= MIN_SIMILARITY
+            and float(result.get("ranking_score", result.get("similarity", 0))) >= MIN_SIMILARITY
+        ][:5]
         if results:
             preview = pd.DataFrame(
                 [
                     {
+                        "Rank": rank,
                         "Similarity": r["similarity"],
+                        "Ranking Score": r.get("ranking_score", r["similarity"]),
                         "Document Type": r["metadata"].get("document_type", ""),
                         "Source File": r["metadata"].get("file_name", ""),
                         "Sheet": r["metadata"].get("sheet_name", ""),
                         "Row": r["metadata"].get("row_number", ""),
                         "Preview": r["chunk_text"][:160],
                     }
-                    for r in results
+                    for rank, r in enumerate(results, start=1)
                 ]
             )
+            st.caption(
+                f"Showing up to 5 matches at or above the grounding threshold of {MIN_SIMILARITY:.2f} "
+                "after component-conflict reranking."
+            )
             st.dataframe(preview, width="stretch", hide_index=True)
+            result_signature = hashlib.sha256(
+                (
+                    preview_type
+                    + "\n"
+                    + clean_query
+                    + "\n"
+                    + "|".join(str(result.get("chunk_id", "")) for result in results)
+                ).encode()
+            ).hexdigest()[:16]
+            result_by_id = {str(result.get("chunk_id", "")): result for result in results}
+            rank_by_id = {
+                str(result.get("chunk_id", "")): rank
+                for rank, result in enumerate(results, start=1)
+            }
+
+            def format_retrieved_result(chunk_id: str) -> str:
+                result = result_by_id[chunk_id]
+                metadata = result.get("metadata", {})
+                return (
+                    f"Rank {rank_by_id[chunk_id]}: {metadata.get('file_name', 'Unknown file')} "
+                    f"| {metadata.get('sheet_name', 'Unknown sheet')} "
+                    f"| row {metadata.get('row_number', 'N/A')} "
+                    f"| similarity {result['similarity']:.4f}"
+                )
+
+            with st.expander("View full retrieved record", expanded=False):
+                selected_chunk_id = st.selectbox(
+                    "Retrieved result",
+                    options=list(result_by_id),
+                    format_func=format_retrieved_result,
+                    key=f"kb_full_record_{result_signature}",
+                )
+                selected = result_by_id[selected_chunk_id]
+                selected_rank = rank_by_id[selected_chunk_id] - 1
+                selected_meta = selected.get("metadata", {})
+                record_metadata = pd.DataFrame(
+                    [
+                        {
+                            "Rank": selected_rank + 1,
+                            "Similarity": round(float(selected.get("similarity", 0)), 4),
+                            "Ranking Score": round(float(selected.get("ranking_score", selected.get("similarity", 0))), 4),
+                            "Document Type": selected_meta.get("document_type", ""),
+                            "Source File": selected_meta.get("file_name", ""),
+                            "Sheet": selected_meta.get("sheet_name", ""),
+                            "Row": selected_meta.get("row_number", ""),
+                            "Source Strength": selected_meta.get("source_strength", ""),
+                            "Chunk ID": selected.get("chunk_id", ""),
+                        }
+                    ]
+                )
+                st.dataframe(record_metadata, width="stretch", hide_index=True)
+                st.caption("Full retrieved chunk, including IDs, engineering fields, and test markers:")
+                st.code(str(selected.get("chunk_text", "")), language="text", wrap_lines=True)
         else:
-            st.info("No results — seed the corpus or upload documents first.")
+            st.info(
+                f"No matches met the {MIN_SIMILARITY:.2f} grounding threshold. "
+                "Try a more specific query, another document type, or add relevant source documents."
+            )
 
     if not st.session_state.retrieved_sources_df.empty:
         st.divider()
@@ -3444,7 +3698,20 @@ def render_dfmea() -> None:
             "Special Characteristic": st.column_config.SelectboxColumn(options=SPECIAL_CHARACTERISTIC_VALUES),
             "AP (AIAG-VDA)": st.column_config.SelectboxColumn(options=["H", "M", "L"]),
         },
+        disabled=[
+            "Initial RPN",
+            "RPN",
+            "Action Priority",
+            "AP (AIAG-VDA)",
+            "Special Characteristic",
+            "Revised RPN",
+            "RPN Reduction %",
+            "Residual Risk Level",
+            "Human Review Required",
+            "Reason for Human Review",
+        ],
     )
+    st.session_state.dfmea_df = recalculate_dfmea_derived_fields(st.session_state.dfmea_df)
     refresh_downstream_from_edits()
     st.download_button("Download DFMEA CSV", dataframe_to_csv(st.session_state.dfmea_df), "dfmea_draft.csv", "text/csv")
 
@@ -3517,6 +3784,8 @@ def render_dashboard() -> None:
         st.session_state.lessons_df,
     )
     kpis = dashboard[dashboard["Section"] == "KPI"]
+    if st.session_state.get("rag_error"):
+        st.error(st.session_state.rag_error)
     metric_cols = st.columns(4)
     for idx, (_, row) in enumerate(kpis.head(8).iterrows()):
         metric_cols[idx % 4].metric(str(row["Metric"]), str(row["Value"]))
@@ -3526,26 +3795,23 @@ def render_dashboard() -> None:
         try:
             stats = get_rag_store().get_collection_stats()
             dfmea_df, dvp_df = st.session_state.dfmea_df, st.session_state.dvp_df
-            grounded = safe_count(dfmea_df, "Source Type", "RAG Retrieved (rules draft)") + safe_count(
-                dvp_df, "Source Type", "RAG Retrieved (rules draft)"
+            grounded = sum(
+                int(df["Source Chunk ID"].fillna("").astype(str).str.strip().ne("").sum())
+                for df in (dfmea_df, dvp_df)
+                if not df.empty and "Source Chunk ID" in df.columns
             )
             total_rows = len(dfmea_df) + len(dvp_df)
             fallback = total_rows - grounded
-            avg_conf = 0.0
-            if total_rows:
-                avg_conf = (
-                    mean_numeric(dfmea_df, "AI Confidence Score") * len(dfmea_df)
-                    + mean_numeric(dvp_df, "AI Confidence Score") * len(dvp_df)
-                ) / total_rows
+            avg_conf = rag_confidence_average(dfmea_df, dvp_df)
             st.markdown("**RAG knowledge layer**")
             r1, r2, r3, r4, r5 = st.columns(5)
             r1.metric("Documents Indexed", stats["documents"])
             r2.metric("Knowledge Chunks", stats["chunks"])
             r3.metric("Rows with Source Evidence", grounded)
             r4.metric("Rule-Based Fallback Rows", fallback)
-            r5.metric("Avg AI Confidence", f"{avg_conf:.2f}")
-        except Exception:
-            pass
+            r5.metric("Avg RAG Confidence", f"{avg_conf:.2f}" if avg_conf is not None else "N/A")
+        except Exception as exc:
+            st.error(f"RAG KPI calculation failed: {exc}")
     st.dataframe(dashboard.astype(str), width="stretch", hide_index=True)
 
     if not st.session_state.dfmea_df.empty:
